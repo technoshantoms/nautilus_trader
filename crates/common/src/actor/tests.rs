@@ -23,7 +23,6 @@ use std::{
     sync::Arc,
 };
 
-use alloy_primitives::{I256, U160};
 use bytes::Bytes;
 use indexmap::IndexMap;
 use log::LevelFilter;
@@ -700,7 +699,7 @@ fn test_subscribe_and_receive_bars(
     actor.start().unwrap();
 
     let bar_type = BarType::from_str(&format!("{}-1-MINUTE-LAST-INTERNAL", audusd_sim.id)).unwrap();
-    actor.subscribe_bars(bar_type, None, false, None);
+    actor.subscribe_bars(bar_type, None, None);
 
     let topic = get_bars_topic(bar_type);
     let bar = Bar::default();
@@ -721,7 +720,7 @@ fn test_unsubscribe_bars(
     actor.start().unwrap();
 
     let bar_type = BarType::from_str(&format!("{}-1-MINUTE-LAST-INTERNAL", audusd_sim.id)).unwrap();
-    actor.subscribe_bars(bar_type, None, false, None);
+    actor.subscribe_bars(bar_type, None, None);
 
     let topic = get_bars_topic(bar_type);
     let bar = Bar::default();
@@ -1596,14 +1595,15 @@ fn test_subscribe_and_receive_pool_swaps(
     cache: Rc<RefCell<Cache>>,
     trader_id: TraderId,
 ) {
-    let actor_id = register_data_actor(clock, cache, trader_id);
-    let actor = get_actor_unchecked::<TestDataActor>(&actor_id);
-    actor.start().unwrap();
-
+    use alloy_primitives::{I256, U160};
     use nautilus_model::{
         defi::{AmmType, Dex, DexType, chain::chains},
         identifiers::InstrumentId,
     };
+
+    let actor_id = register_data_actor(clock, cache, trader_id);
+    let actor = get_actor_unchecked::<TestDataActor>(&actor_id);
+    actor.start().unwrap();
 
     let chain = Arc::new(chains::ETHEREUM.clone());
     let dex = Dex::new(
@@ -1637,6 +1637,8 @@ fn test_subscribe_and_receive_pool_swaps(
         I256::from_str("1000000000000000000").unwrap(),
         I256::from_str("400000000000000").unwrap(),
         U160::from(59000000000000u128),
+        1000000,
+        100,
         Some(OrderSide::Buy),
         Some(Quantity::from("1000")),
         Some(Price::from("500")),
@@ -1659,11 +1661,12 @@ fn test_unsubscribe_pool_swaps(
     cache: Rc<RefCell<Cache>>,
     trader_id: TraderId,
 ) {
+    use alloy_primitives::{I256, U160};
+    use nautilus_model::defi::{Dex, DexType, Pool, chain::chains, dex::AmmType};
+
     let actor_id = register_data_actor(clock, cache, trader_id);
     let actor = get_actor_unchecked::<TestDataActor>(&actor_id);
     actor.start().unwrap();
-
-    use nautilus_model::defi::{Dex, DexType, Pool, chain::chains, dex::AmmType};
 
     let chain = Arc::new(chains::ETHEREUM.clone());
     let dex = Dex::new(
@@ -1699,6 +1702,8 @@ fn test_unsubscribe_pool_swaps(
         I256::from_str("1000000000000000000").unwrap(),
         I256::from_str("400000000000000").unwrap(),
         U160::from(59000000000000u128),
+        1000000,
+        100,
         Some(OrderSide::Buy),
         Some(Quantity::from("1000")),
         Some(Price::from("500")),
@@ -1722,6 +1727,8 @@ fn test_unsubscribe_pool_swaps(
         I256::from_str("1000000000000000000").unwrap(),
         I256::from_str("400000000000000").unwrap(),
         U160::from(59000000000000u128),
+        1000000,
+        100,
         Some(OrderSide::Sell),
         Some(Quantity::from("2000")),
         Some(Price::from("1000")),

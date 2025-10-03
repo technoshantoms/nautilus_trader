@@ -106,7 +106,12 @@ pub fn pool_definition(
     pool
 }
 
-fn create_mint_event(ticker_lower: i32, ticker_upper: i32, liquidity: u128) -> PoolLiquidityUpdate {
+fn create_mint_event(
+    owner: Address,
+    ticker_lower: i32,
+    ticker_upper: i32,
+    liquidity: u128,
+) -> PoolLiquidityUpdate {
     let pool_definition = pool_definition(None, None, None);
     let (amount0, amount1) = get_amounts_for_liquidity(
         sqrt_price_x98(),
@@ -125,7 +130,7 @@ fn create_mint_event(ticker_lower: i32, ticker_upper: i32, liquidity: u128) -> P
         0,
         1,
         None,
-        lp_address(),
+        owner,
         liquidity,
         amount0,
         amount1,
@@ -135,7 +140,12 @@ fn create_mint_event(ticker_lower: i32, ticker_upper: i32, liquidity: u128) -> P
     )
 }
 
-fn create_burn_event(ticker_lower: i32, ticker_upper: i32, liquidity: u128) -> PoolLiquidityUpdate {
+fn create_burn_event(
+    owner: Address,
+    ticker_lower: i32,
+    ticker_upper: i32,
+    liquidity: u128,
+) -> PoolLiquidityUpdate {
     let pool_definition = pool_definition(None, None, None);
     let (amount0, amount1) = get_amounts_for_liquidity(
         sqrt_price_x98(),
@@ -154,7 +164,7 @@ fn create_burn_event(ticker_lower: i32, ticker_upper: i32, liquidity: u128) -> P
         0,
         1,
         None,
-        lp_address(),
+        owner,
         liquidity,
         amount0,
         amount1,
@@ -203,6 +213,10 @@ fn lp_address() -> Address {
 
 fn user_address() -> Address {
     address!("0x1aa3506e78dd6e7e53986fa310c7ef1b7825042e")
+}
+
+fn other_address() -> Address {
+    address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
 }
 
 #[fixture]
@@ -262,7 +276,12 @@ fn test_process_mint_with_fail_if_pool_not_initialized() {
     let pool_definition = pool_definition(None, None, None);
     let mut profiler = PoolProfiler::new(Arc::new(pool_definition));
     let tick_spacing = profiler.pool.tick_spacing.unwrap();
-    let mint_event = create_mint_event(tick_spacing as i32, (tick_spacing * 2) as i32, 1);
+    let mint_event = create_mint_event(
+        lp_address(),
+        tick_spacing as i32,
+        (tick_spacing * 2) as i32,
+        1,
+    );
     profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -270,7 +289,7 @@ fn test_process_mint_with_fail_if_pool_not_initialized() {
 
 #[rstest]
 fn test_if_pool_process_fails_if_tick_lower_is_greater_than_tick_upper(mut profiler: PoolProfiler) {
-    let mint_event = create_mint_event(2, 1, 1);
+    let mint_event = create_mint_event(lp_address(), 2, 1, 1);
     let result = profiler.process(&DexPoolData::LiquidityUpdate(mint_event));
     assert!(result.is_err_and(|error| error.to_string() == "Invalid tick range: 2 >= 1"));
 }
@@ -278,7 +297,7 @@ fn test_if_pool_process_fails_if_tick_lower_is_greater_than_tick_upper(mut profi
 #[rstest]
 fn test_if_pool_process_fails_if_tick_are_not_multiple_of_tick_spacing(mut profiler: PoolProfiler) {
     // Create mint event with tick 1 and 2 (which are not multiple of tick spacing which is 60)
-    let mint_event = create_mint_event(1, 2, 1);
+    let mint_event = create_mint_event(lp_address(), 1, 2, 1);
     let result = profiler.process(&DexPoolData::LiquidityUpdate(mint_event));
     assert!(result.is_err());
     assert_eq!(
@@ -344,7 +363,7 @@ fn test_execute_mint_equivalence() {
     let block = create_block_position();
 
     // Method 1: Use process_mint with a created event
-    let mint_event = create_mint_event(tick_lower, tick_upper, liquidity);
+    let mint_event = create_mint_event(lp_address(), tick_lower, tick_upper, liquidity);
     profiler1
         .process(&DexPoolData::LiquidityUpdate(mint_event.clone()))
         .unwrap();
@@ -442,7 +461,7 @@ fn test_execute_burn_equivalence() {
     let block = create_block_position();
 
     // Set up initial mint in both profilers
-    let initial_mint = create_mint_event(tick_lower, tick_upper, initial_liquidity);
+    let initial_mint = create_mint_event(lp_address(), tick_lower, tick_upper, initial_liquidity);
     profiler1
         .process(&DexPoolData::LiquidityUpdate(initial_mint.clone()))
         .unwrap();
@@ -451,7 +470,7 @@ fn test_execute_burn_equivalence() {
         .unwrap();
 
     // Method 1: Use process_burn with a created event
-    let burn_event = create_burn_event(tick_lower, tick_upper, burn_liquidity);
+    let burn_event = create_burn_event(lp_address(), tick_lower, tick_upper, burn_liquidity);
     profiler1
         .process(&DexPoolData::LiquidityUpdate(burn_event.clone()))
         .unwrap();
@@ -556,7 +575,7 @@ fn test_execute_swap_equivalence() {
     let min_tick = Tick::get_min_tick(TICK_SPACING);
     let max_tick = Tick::get_max_tick(TICK_SPACING);
     let initial_liquidity = 10000u128;
-    let mint_event = create_mint_event(min_tick, max_tick, initial_liquidity);
+    let mint_event = create_mint_event(lp_address(), min_tick, max_tick, initial_liquidity);
 
     profiler1
         .process(&DexPoolData::LiquidityUpdate(mint_event.clone()))
@@ -625,10 +644,74 @@ fn uni_pool_profiler() -> PoolProfiler {
     profiler.initialize(sqrt_price_x98());
     let min_tick = Tick::get_min_tick(TICK_SPACING);
     let max_tick = Tick::get_max_tick(TICK_SPACING);
-    let mint_event = create_mint_event(min_tick, max_tick, 3161);
+    let mint_event = create_mint_event(lp_address(), min_tick, max_tick, 3161);
     profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
+    profiler
+}
+
+// LOW fee tier pool (500 = 0.05%, tick spacing = 10) for matching Solidity tests
+// Matches: https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L531
+#[fixture]
+fn low_fee_pool_profiler() -> PoolProfiler {
+    let pool_definition = pool_definition(Some(500), Some(10), Some(encode_sqrt_ratio_x96(1, 1)));
+    let mut profiler = PoolProfiler::new(Arc::new(pool_definition));
+    profiler.initialize(encode_sqrt_ratio_x96(1, 1)); // Initialize at 1:1 price (tick 0)
+
+    // Mint initial liquidity to match Solidity test setup (initializeLiquidityAmount = 2e18)
+    const LOW_FEE_TICK_SPACING: i32 = 10;
+    let min_tick = Tick::get_min_tick(LOW_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(LOW_FEE_TICK_SPACING);
+    let initial_liquidity = expand_to_18_decimals(2);
+
+    profiler
+        .execute_mint(
+            lp_address(),
+            create_block_position(),
+            min_tick,
+            max_tick,
+            initial_liquidity,
+        )
+        .unwrap();
+
+    profiler
+}
+
+// MEDIUM fee tier pool (3000 = 0.3%, tick spacing = 60) for matching Solidity tests
+// Matches: https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L564
+#[fixture]
+fn medium_fee_pool_profiler() -> PoolProfiler {
+    let pool_definition = pool_definition(Some(3000), Some(60), Some(encode_sqrt_ratio_x96(1, 1)));
+    let mut profiler = PoolProfiler::new(Arc::new(pool_definition));
+    profiler.initialize(encode_sqrt_ratio_x96(1, 1)); // Initialize at 1:1 price (tick 0)
+
+    // Mint initial liquidity to match Solidity test setup (initializeLiquidityAmount = 2e18)
+    const MEDIUM_FEE_TICK_SPACING: i32 = 60;
+    let min_tick = Tick::get_min_tick(MEDIUM_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(MEDIUM_FEE_TICK_SPACING);
+    let initial_liquidity = expand_to_18_decimals(2);
+
+    profiler
+        .execute_mint(
+            lp_address(),
+            create_block_position(),
+            min_tick,
+            max_tick,
+            initial_liquidity,
+        )
+        .unwrap();
+
+    profiler
+}
+
+// Empty LOW fee tier pool (500 = 0.05%, tick spacing = 10) with no initial liquidity
+// For tests that need to control liquidity from scratch
+#[fixture]
+fn empty_low_fee_pool_profiler() -> PoolProfiler {
+    let pool_definition = pool_definition(Some(500), Some(10), Some(encode_sqrt_ratio_x96(1, 1)));
+    let mut profiler = PoolProfiler::new(Arc::new(pool_definition));
+    profiler.initialize(encode_sqrt_ratio_x96(1, 1)); // Initialize at 1:1 price (tick 0)
     profiler
 }
 
@@ -646,6 +729,11 @@ fn test_uni_pool_profiler_initial_state(uni_pool_profiler: PoolProfiler) {
     assert_eq!(position.total_amount0_deposited, U256::from(9996u32));
     assert_eq!(position.total_amount1_deposited, U256::from(1000u32));
     assert_eq!(uni_pool_profiler.get_active_liquidity(), 3161);
+    assert_eq!(
+        uni_pool_profiler.get_active_liquidity(),
+        uni_pool_profiler.get_total_liquidity_from_active_positions(),
+        "Tick map liquidity should match sum of active positions"
+    );
     assert_eq!(uni_pool_profiler.get_total_active_positions(), 1);
     assert_eq!(uni_pool_profiler.get_total_inactive_positions(), 0);
 }
@@ -657,7 +745,7 @@ fn test_mint_above_current_price(mut uni_pool_profiler: PoolProfiler) {
     let lower_tick = -22980;
     let upper_tick = 0;
     let liquidity = 10000;
-    let mint_event = create_mint_event(lower_tick, upper_tick, liquidity);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, liquidity);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -700,7 +788,7 @@ fn test_max_tick_with_high_leverage(mut uni_pool_profiler: PoolProfiler) {
     let upper_tick = max_tick;
     let liquidity = U256::from(2u128).pow(U256::from(102u128)).to::<u128>();
 
-    let mint_event = create_mint_event(lower_tick, upper_tick, liquidity);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, liquidity);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -733,7 +821,7 @@ fn test_minting_works_for_max_tick(mut uni_pool_profiler: PoolProfiler) {
     let upper_tick = max_tick;
     let liquidity = 10000;
 
-    let mint_event = create_mint_event(lower_tick, upper_tick, liquidity);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, liquidity);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -770,8 +858,8 @@ fn test_if_removing_of_liquidity_works_after_mint(mut uni_pool_profiler: PoolPro
     let upper_tick = 0;
     let liquidity = 10000;
 
-    let mint_event = create_mint_event(lower_tick, upper_tick, liquidity);
-    let burn_event = create_burn_event(lower_tick, upper_tick, liquidity);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, liquidity);
+    let burn_event = create_burn_event(lp_address(), lower_tick, upper_tick, liquidity);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -823,7 +911,7 @@ fn test_if_removing_of_liquidity_works_after_mint(mut uni_pool_profiler: PoolPro
 fn test_if_we_correctly_add_and_remove_liquidity_gross_after_every_updates(
     mut uni_pool_profiler: PoolProfiler,
 ) {
-    let mint_event = create_mint_event(-240, 0, 100);
+    let mint_event = create_mint_event(lp_address(), -240, 0, 100);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -854,7 +942,7 @@ fn test_if_we_correctly_add_and_remove_liquidity_gross_after_every_updates(
     );
 
     // Mint again at -240 and at TICK_SPACING
-    let mint_event = create_mint_event(-240, TICK_SPACING, 150);
+    let mint_event = create_mint_event(lp_address(), -240, TICK_SPACING, 150);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -890,7 +978,7 @@ fn test_if_we_correctly_add_and_remove_liquidity_gross_after_every_updates(
     );
 
     // Mint again at 0 and at TICK_SPACING * 2
-    let mint_event = create_mint_event(0, TICK_SPACING * 2, 60);
+    let mint_event = create_mint_event(lp_address(), 0, TICK_SPACING * 2, 60);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -928,7 +1016,7 @@ fn test_if_we_correctly_add_and_remove_liquidity_gross_after_every_updates(
     );
 
     // Burn at tick -240 and 0
-    let burn_event = create_burn_event(-240, 0, 90);
+    let burn_event = create_burn_event(lp_address(), -240, 0, 90);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(burn_event))
         .unwrap();
@@ -957,8 +1045,8 @@ fn test_if_we_correctly_add_and_remove_liquidity_gross_after_every_updates(
         150
     ); // untouched
 
-    // Burn again to clear the tick 0 with 70, and leave remaining -240
-    let burn_event = create_burn_event(-240, 0, 70);
+    // Burn again to clear the remaining 10 from position (-240, 0)
+    let burn_event = create_burn_event(lp_address(), -240, 0, 10);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(burn_event))
         .unwrap();
@@ -968,9 +1056,191 @@ fn test_if_we_correctly_add_and_remove_liquidity_gross_after_every_updates(
             .get_tick(-240)
             .unwrap()
             .liquidity_gross,
-        90
-    ); // 160 - 70
-    assert!(uni_pool_profiler.tick_map.get_tick(0).is_none()); // This should be None and cleared in the tickmap
+        150
+    ); // 160 - 10
+    assert_eq!(
+        uni_pool_profiler
+            .tick_map
+            .get_tick(0)
+            .unwrap()
+            .liquidity_gross,
+        60
+    ); // 70 - 10
+}
+
+#[rstest]
+fn test_burn_uninitialized_position(mut uni_pool_profiler: PoolProfiler) {
+    // Try to burn a position that was never minted
+    let burn_event = create_burn_event(lp_address(), -240, 0, 100);
+
+    let result = uni_pool_profiler.process(&DexPoolData::LiquidityUpdate(burn_event));
+
+    // Should fail because position doesn't exist (will be init with 0 liquidity) and trying to burn > 0
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Position liquidity 0 is less than the requested burn amount of 100",
+    );
+}
+
+#[rstest]
+fn test_position_fee_growth_and_tokens_owed_after_swaps(mut uni_pool_profiler: PoolProfiler) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L510
+    let lower_tick = Tick::get_min_tick(TICK_SPACING) + TICK_SPACING;
+    let upper_tick = Tick::get_max_tick(TICK_SPACING) - TICK_SPACING;
+
+    // Mint position with 1e18 liquidity for "other" address
+    let mint_event = create_mint_event(
+        other_address(),
+        lower_tick,
+        upper_tick,
+        expand_to_18_decimals(1),
+    );
+    uni_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Execute swaps to generate fees
+    // Swap 0.1e18 token0 for token1
+    uni_pool_profiler
+        .swap_exact0_for_1(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)) / U256::from(10),
+            None,
+        )
+        .unwrap();
+
+    // Swap 0.01e18 token1 for token0
+    uni_pool_profiler
+        .swap_exact1_for_0(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)) / U256::from(100),
+            None,
+        )
+        .unwrap();
+
+    // Now mint 1 wei of liquidity for "lp_address" (wallet) - this creates a NEW position
+    let mint_1_wei = create_mint_event(lp_address(), lower_tick, upper_tick, 1);
+    uni_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_1_wei))
+        .unwrap();
+
+    // Verify position state after minting 1 wei (this is a fresh position for lp_address)
+    let position = uni_pool_profiler
+        .get_position(&lp_address(), lower_tick, upper_tick)
+        .expect("Position should exist");
+
+    assert_eq!(position.liquidity, 1);
+    assert_eq!(
+        position.fee_growth_inside_0_last,
+        U256::from_str("102084710076281216349243831104605583").unwrap()
+    );
+    assert_eq!(
+        position.fee_growth_inside_1_last,
+        U256::from_str("10208471007628121634924383110460558").unwrap()
+    );
+    assert_eq!(position.tokens_owed_0, 0, "tokens owed 0 before burn");
+    assert_eq!(position.tokens_owed_1, 0, "tokens owed 1 before burn");
+
+    // Burn the 1 wei of liquidity
+    let burn_1_wei = create_burn_event(lp_address(), lower_tick, upper_tick, 1);
+    uni_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_1_wei))
+        .unwrap();
+
+    // Verify position state after burning
+    let position_after = uni_pool_profiler
+        .get_position(&lp_address(), lower_tick, upper_tick)
+        .expect("Position should exist");
+
+    assert_eq!(position_after.liquidity, 0);
+    assert_eq!(
+        position_after.fee_growth_inside_0_last,
+        U256::from_str("102084710076281216349243831104605583").unwrap()
+    );
+    assert_eq!(
+        position_after.fee_growth_inside_1_last,
+        U256::from_str("10208471007628121634924383110460558").unwrap()
+    );
+    assert_eq!(position_after.tokens_owed_0, 3, "tokens owed 0 after burn");
+    assert_eq!(position_after.tokens_owed_1, 0, "tokens owed 1 after burn");
+}
+
+#[rstest]
+fn test_does_not_clear_position_fee_growth_snapshot_if_no_more_liquidity(
+    mut medium_fee_pool_profiler: PoolProfiler,
+) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L564
+    const MEDIUM_FEE_TICK_SPACING: i32 = 60;
+    let min_tick = Tick::get_min_tick(MEDIUM_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(MEDIUM_FEE_TICK_SPACING);
+
+    // Mint 1e18 liquidity for "other" address
+    let mint_event = create_mint_event(
+        other_address(),
+        min_tick,
+        max_tick,
+        expand_to_18_decimals(1),
+    );
+    medium_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Execute swaps to generate fees
+    // Swap 1e18 token0 for token1
+    medium_fee_pool_profiler
+        .swap_exact0_for_1(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)),
+            None,
+        )
+        .unwrap();
+
+    // Swap 1e18 token1 for token0
+    medium_fee_pool_profiler
+        .swap_exact1_for_0(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)),
+            None,
+        )
+        .unwrap();
+
+    // Burn all liquidity
+    let burn_event = create_burn_event(
+        other_address(),
+        min_tick,
+        max_tick,
+        expand_to_18_decimals(1),
+    );
+    medium_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event))
+        .unwrap();
+
+    // Verify position state after burning all liquidity
+    let position = medium_fee_pool_profiler
+        .get_position(&other_address(), min_tick, max_tick)
+        .expect("Position should exist");
+
+    assert_eq!(position.liquidity, 0);
+    assert_ne!(position.tokens_owed_0, 0, "tokens owed 0 should not be 0");
+    assert_ne!(position.tokens_owed_1, 0, "tokens owed 1 should not be 0");
+    // Fee growth snapshots should NOT be cleared when liquidity goes to 0
+    assert_eq!(
+        position.fee_growth_inside_0_last,
+        U256::from_str("340282366920938463463374607431768211").unwrap()
+    );
+    assert_eq!(
+        position.fee_growth_inside_1_last,
+        U256::from_str("340282366920938576890830247744589365").unwrap()
+    );
 }
 
 // ---------- TEST MINTS INCLUDING CURRENT PRICE ----------
@@ -980,7 +1250,7 @@ fn test_mint_if_range_includes_current_price(mut uni_pool_profiler: PoolProfiler
     let lower_tick = Tick::get_min_tick(TICK_SPACING) + TICK_SPACING;
     let upper_tick = Tick::get_max_tick(TICK_SPACING) - TICK_SPACING;
 
-    let mint_event = create_mint_event(lower_tick, upper_tick, 100);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, 100);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -1018,7 +1288,7 @@ fn test_mint_for_min_and_max_ticks(mut uni_pool_profiler: PoolProfiler) {
     // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L383
     let lower_tick = Tick::get_min_tick(TICK_SPACING);
     let upper_tick = Tick::get_max_tick(TICK_SPACING);
-    let mint_event = create_mint_event(lower_tick, upper_tick, 10000);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, 10000);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -1045,8 +1315,8 @@ fn test_mint_then_burning_and_collecting(mut uni_pool_profiler: PoolProfiler) {
     let lower_tick = Tick::get_min_tick(TICK_SPACING) + TICK_SPACING;
     let upper_tick = Tick::get_max_tick(TICK_SPACING) - TICK_SPACING;
 
-    let mint_event = create_mint_event(lower_tick, upper_tick, 100);
-    let burn_event = create_burn_event(lower_tick, upper_tick, 100);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, 100);
+    let burn_event = create_burn_event(lp_address(), lower_tick, upper_tick, 100);
     let collect_event = create_collect_event(lower_tick, upper_tick, u128::MAX, u128::MAX);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
@@ -1084,7 +1354,7 @@ fn test_mint_below_current_price_when_token1_only_changed(mut uni_pool_profiler:
     let lower_tick = -46080;
     let upper_tick = -23040;
     let liquidity = 10000;
-    let mint_event = create_mint_event(lower_tick, upper_tick, liquidity);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, liquidity);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -1111,7 +1381,7 @@ fn test_mint_bellow_current_price_when_really_high_leverage(mut uni_pool_profile
     let upper_tick = lower_tick + TICK_SPACING;
     let liquidity = U256::from(2u128).pow(U256::from(102u128)).to::<u128>();
 
-    let mint_event = create_mint_event(lower_tick, upper_tick, liquidity);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, liquidity);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -1139,8 +1409,8 @@ fn test_if_mint_below_current_price_works_after_burn_and_fee_collect(
     let lower_tick = -46080;
     let upper_tick = -46020;
     let liquidity = 10000;
-    let mint_event = create_mint_event(lower_tick, upper_tick, liquidity);
-    let burn_event = create_burn_event(lower_tick, upper_tick, 10000);
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, liquidity);
+    let burn_event = create_burn_event(lp_address(), lower_tick, upper_tick, 10000);
     uni_pool_profiler
         .process(&DexPoolData::LiquidityUpdate(mint_event))
         .unwrap();
@@ -1181,6 +1451,477 @@ fn test_if_mint_below_current_price_works_after_burn_and_fee_collect(
     } else {
         panic!("Position should exist");
     }
+}
+
+#[rstest]
+fn test_collect_with_invalid_ticks_does_not_panic(mut uni_pool_profiler: PoolProfiler) {
+    let min_tick = Tick::get_min_tick(TICK_SPACING);
+    let max_tick = Tick::get_max_tick(TICK_SPACING);
+
+    let initial_position = uni_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position should exist");
+    let initial_tokens_owed_0 = initial_position.tokens_owed_0;
+
+    // Collect with invalid ticks (tick_lower > tick_upper) should not panic
+    let invalid_collect = create_collect_event(100, 50, 1000, 1000);
+    let result = uni_pool_profiler.process(&DexPoolData::FeeCollect(invalid_collect));
+    assert!(result.is_ok());
+
+    // Verify valid position remains unchanged
+    let position_after = uni_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position should still exist");
+    assert_eq!(position_after.tokens_owed_0, initial_tokens_owed_0);
+}
+
+#[rstest]
+fn test_collect_works_with_multiple_lps(mut empty_low_fee_pool_profiler: PoolProfiler) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L944
+    const LOW_FEE_TICK_SPACING: i32 = 10;
+    let min_tick = Tick::get_min_tick(LOW_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(LOW_FEE_TICK_SPACING);
+
+    // Mint position 1 at full range (minTick, maxTick) with 1e18 liquidity
+    let mint_event1 = create_mint_event(lp_address(), min_tick, max_tick, expand_to_18_decimals(1));
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event1))
+        .unwrap();
+
+    // Mint position 2 at narrower range (minTick + tickSpacing, maxTick - tickSpacing) with 2e18 liquidity
+    let mint_event2 = create_mint_event(
+        lp_address(),
+        min_tick + LOW_FEE_TICK_SPACING,
+        max_tick - LOW_FEE_TICK_SPACING,
+        expand_to_18_decimals(2),
+    );
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event2))
+        .unwrap();
+
+    // Execute swap: 1e18 token0 for token1
+    empty_low_fee_pool_profiler
+        .swap_exact0_for_1(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)),
+            None,
+        )
+        .unwrap();
+
+    // "Poke" positions by burning 0 liquidity to update fee accounting
+    let burn_event1 = create_burn_event(lp_address(), min_tick, max_tick, 0);
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event1))
+        .unwrap();
+
+    let burn_event2 = create_burn_event(
+        lp_address(),
+        min_tick + LOW_FEE_TICK_SPACING,
+        max_tick - LOW_FEE_TICK_SPACING,
+        0,
+    );
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event2))
+        .unwrap();
+
+    // Check tokens owed for both positions
+    let position0 = empty_low_fee_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position 0 should exist");
+
+    let position1 = empty_low_fee_pool_profiler
+        .get_position(
+            &lp_address(),
+            min_tick + LOW_FEE_TICK_SPACING,
+            max_tick - LOW_FEE_TICK_SPACING,
+        )
+        .expect("Position 1 should exist");
+
+    // Position 0 (full range, 1e18 liquidity) should get 1/3 of fees
+    assert_eq!(position0.tokens_owed_0, 166666666666667);
+    // Position 1 (narrower range, 2e18 liquidity) should get 2/3 of fees
+    assert_eq!(position1.tokens_owed_0, 333333333333334);
+}
+
+// ---------- WORKS ACROSS LARGE FEE INCREASES ----------
+
+#[rstest]
+fn test_fee_growth_just_before_cap_binds(mut empty_low_fee_pool_profiler: PoolProfiler) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L974
+    const LOW_FEE_TICK_SPACING: i32 = 10;
+    let min_tick = Tick::get_min_tick(LOW_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(LOW_FEE_TICK_SPACING);
+
+    // Mint 1e18 liquidity
+    let mint_event = create_mint_event(lp_address(), min_tick, max_tick, expand_to_18_decimals(1));
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Magic number: (2^128 - 1) * 2^128 / 1e18
+    // This value will result in tokensOwed = MaxUint128 - 1
+    let magic_number =
+        U256::from_str("115792089237316195423570985008687907852929702298719625575994").unwrap();
+
+    // Set fee growth to magic number
+    empty_low_fee_pool_profiler.set_fee_growth_global(magic_number, U256::ZERO);
+
+    // "Poke" position by burning 0 liquidity to update fee accounting
+    let burn_event = create_burn_event(lp_address(), min_tick, max_tick, 0);
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event))
+        .unwrap();
+
+    let position = empty_low_fee_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position should exist");
+
+    // tokens_owed_0 should be MaxUint128 - 1
+    assert_eq!(position.tokens_owed_0, u128::MAX - 1);
+    assert_eq!(position.tokens_owed_1, 0);
+}
+
+#[rstest]
+fn test_fee_growth_just_after_cap_binds(mut empty_low_fee_pool_profiler: PoolProfiler) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L984
+    const LOW_FEE_TICK_SPACING: i32 = 10;
+    let min_tick = Tick::get_min_tick(LOW_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(LOW_FEE_TICK_SPACING);
+
+    // Mint 1e18 liquidity
+    let mint_event = create_mint_event(lp_address(), min_tick, max_tick, expand_to_18_decimals(1));
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Magic number + 1: This will cap at MaxUint128
+    let magic_number =
+        U256::from_str("115792089237316195423570985008687907852929702298719625575995").unwrap();
+
+    // Set fee growth to magic number + 1
+    empty_low_fee_pool_profiler.set_fee_growth_global(magic_number, U256::ZERO);
+
+    // "Poke" position by burning 0 liquidity
+    let burn_event = create_burn_event(lp_address(), min_tick, max_tick, 0);
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event))
+        .unwrap();
+
+    let position = empty_low_fee_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position should exist");
+
+    // tokens_owed_0 should be capped at MaxUint128
+    assert_eq!(position.tokens_owed_0, u128::MAX);
+    assert_eq!(position.tokens_owed_1, 0);
+}
+
+#[rstest]
+fn test_fee_growth_well_after_cap_binds(mut empty_low_fee_pool_profiler: PoolProfiler) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L994
+    const LOW_FEE_TICK_SPACING: i32 = 10;
+    let min_tick = Tick::get_min_tick(LOW_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(LOW_FEE_TICK_SPACING);
+
+    // Mint 1e18 liquidity
+    let mint_event = create_mint_event(lp_address(), min_tick, max_tick, expand_to_18_decimals(1));
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Set fee growth to MaxUint256
+    empty_low_fee_pool_profiler.set_fee_growth_global(U256::MAX, U256::ZERO);
+
+    // "Poke" position by burning 0 liquidity
+    let burn_event = create_burn_event(lp_address(), min_tick, max_tick, 0);
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event))
+        .unwrap();
+
+    let position = empty_low_fee_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position should exist");
+
+    // tokens_owed_0 should still be capped at MaxUint128
+    assert_eq!(position.tokens_owed_0, u128::MAX);
+    assert_eq!(position.tokens_owed_1, 0);
+}
+
+// ---------- WORKS ACROSS OVERFLOW BOUNDARIES ----------
+
+#[rstest]
+fn test_overflow_boundary_token0(mut empty_low_fee_pool_profiler: PoolProfiler) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L1012
+    const LOW_FEE_TICK_SPACING: i32 = 10;
+    let min_tick = Tick::get_min_tick(LOW_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(LOW_FEE_TICK_SPACING);
+
+    // Set fee growth to MaxUint256 for both tokens (simulating overflow condition)
+    empty_low_fee_pool_profiler.set_fee_growth_global(U256::MAX, U256::MAX);
+
+    // Mint 10e18 liquidity
+    let mint_event = create_mint_event(lp_address(), min_tick, max_tick, expand_to_18_decimals(10));
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Swap 1e18 token0 for token1
+    empty_low_fee_pool_profiler
+        .swap_exact0_for_1(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)),
+            None,
+        )
+        .unwrap();
+
+    // "Poke" position by burning 0 liquidity to update fee accounting
+    let burn_event = create_burn_event(lp_address(), min_tick, max_tick, 0);
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event))
+        .unwrap();
+
+    let position = empty_low_fee_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position should exist");
+
+    // When fee_growth wraps around from MaxUint256, the underflow-safe calculation
+    // should still correctly compute fees
+    assert_eq!(position.tokens_owed_0, 499999999999999);
+    assert_eq!(position.tokens_owed_1, 0);
+}
+
+#[rstest]
+fn test_overflow_boundary_token1(mut empty_low_fee_pool_profiler: PoolProfiler) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L1024
+    const LOW_FEE_TICK_SPACING: i32 = 10;
+    let min_tick = Tick::get_min_tick(LOW_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(LOW_FEE_TICK_SPACING);
+
+    // Set fee growth to MaxUint256 for both tokens
+    empty_low_fee_pool_profiler.set_fee_growth_global(U256::MAX, U256::MAX);
+
+    // Mint 10e18 liquidity
+    let mint_event = create_mint_event(lp_address(), min_tick, max_tick, expand_to_18_decimals(10));
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Swap 1e18 token1 for token0
+    empty_low_fee_pool_profiler
+        .swap_exact1_for_0(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)),
+            None,
+        )
+        .unwrap();
+
+    // "Poke" position by burning 0 liquidity
+    let burn_event = create_burn_event(lp_address(), min_tick, max_tick, 0);
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event))
+        .unwrap();
+
+    let position = empty_low_fee_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position should exist");
+
+    assert_eq!(position.tokens_owed_0, 0);
+    assert_eq!(position.tokens_owed_1, 499999999999999);
+}
+
+#[rstest]
+fn test_overflow_boundary_token0_and_token1(mut empty_low_fee_pool_profiler: PoolProfiler) {
+    // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L1036
+    const LOW_FEE_TICK_SPACING: i32 = 10;
+    let min_tick = Tick::get_min_tick(LOW_FEE_TICK_SPACING);
+    let max_tick = Tick::get_max_tick(LOW_FEE_TICK_SPACING);
+
+    // Set fee growth to MaxUint256 for both tokens
+    empty_low_fee_pool_profiler.set_fee_growth_global(U256::MAX, U256::MAX);
+
+    // Mint 10e18 liquidity
+    let mint_event = create_mint_event(lp_address(), min_tick, max_tick, expand_to_18_decimals(10));
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Swap 1e18 token0 for token1
+    empty_low_fee_pool_profiler
+        .swap_exact0_for_1(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)),
+            None,
+        )
+        .unwrap();
+
+    // Swap 1e18 token1 for token0
+    empty_low_fee_pool_profiler
+        .swap_exact1_for_0(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            U256::from(expand_to_18_decimals(1)),
+            None,
+        )
+        .unwrap();
+
+    // "Poke" position by burning 0 liquidity
+    let burn_event = create_burn_event(lp_address(), min_tick, max_tick, 0);
+    empty_low_fee_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(burn_event))
+        .unwrap();
+
+    let position = empty_low_fee_pool_profiler
+        .get_position(&lp_address(), min_tick, max_tick)
+        .expect("Position should exist");
+
+    // Both tokens should have fees from their respective swaps
+    assert_eq!(position.tokens_owed_0, 499999999999999);
+    assert_eq!(position.tokens_owed_1, 500000000000000);
+}
+
+// ---------- ACTIVE LIQUIDITY AND TICK CROSSING TESTS WHEN SWAPING ----------
+
+#[rstest]
+fn test_swap_crossing_tick_down_activates_position(mut uni_pool_profiler: PoolProfiler) {
+    // Initial state: current tick is -23028, liquidity is 3161
+    let initial_liquidity = uni_pool_profiler.get_active_liquidity();
+    let initial_tick = uni_pool_profiler.current_tick.unwrap();
+    assert_eq!(initial_liquidity, 3161);
+    assert_eq!(initial_tick, -23028);
+
+    // Mint a position that extends from below current price to MAX_TICK
+    // Position range: [-23040, MAX_TICK] - upper tick at max ensures swap won't exit the position
+    // Tick spacing is 60, so ticks must be multiples of 60
+    let upper_tick = -23040; // Just below current tick -23028
+    let lower_tick = Tick::get_min_tick(TICK_SPACING);
+    let position_liquidity = 50000u128;
+
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, position_liquidity);
+    uni_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Position is inactive (current tick -23028 is below upper tick -23040), so active liquidity unchanged
+    assert_eq!(uni_pool_profiler.get_active_liquidity(), initial_liquidity);
+    assert_eq!(uni_pool_profiler.get_total_active_positions(), 1);
+    assert_eq!(uni_pool_profiler.get_total_inactive_positions(), 1);
+
+    // Execute swap: token0 for token1 to move price down into the position range
+    let amount0_in = U256::from(expand_to_18_decimals(1));
+    let _ = uni_pool_profiler
+        .swap_exact0_for_1(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            amount0_in,
+            None,
+        )
+        .unwrap();
+
+    // Verify price moved down past the upper tick of the position
+    let new_tick = uni_pool_profiler.current_tick.unwrap();
+    assert!(
+        new_tick <= upper_tick,
+        "Price should have crossed to or below tick {}, got {}",
+        upper_tick,
+        new_tick
+    );
+
+    // When crossing tick -23040 downward (cross_tick_down):
+    // - liquidity_net at upper_tick is -50000 (negative, it's upper bound)
+    // - We negate it: -(-50000) = +50000
+    // - Active liquidity should increase by position_liquidity
+    let final_liquidity = uni_pool_profiler.get_active_liquidity();
+    assert_eq!(
+        final_liquidity,
+        initial_liquidity + position_liquidity,
+        "Liquidity should increase when crossing into position range downward"
+    );
+    assert_eq!(
+        uni_pool_profiler.get_active_liquidity(),
+        uni_pool_profiler.get_total_liquidity_from_active_positions(),
+        "Tick map liquidity should match sum of active positions after crossing"
+    );
+
+    // Verify the position is now active
+    assert_eq!(uni_pool_profiler.get_total_active_positions(), 2);
+    assert_eq!(uni_pool_profiler.get_total_inactive_positions(), 0);
+}
+
+#[rstest]
+fn test_swap_crossing_tick_up_activates_position(mut uni_pool_profiler: PoolProfiler) {
+    // Initial state: current tick is -23028, liquidity is 3161
+    let initial_liquidity = uni_pool_profiler.get_active_liquidity();
+    let initial_tick = uni_pool_profiler.current_tick.unwrap();
+    assert_eq!(initial_liquidity, 3161);
+    assert_eq!(initial_tick, -23028);
+
+    // Mint a position above current price that will become active when price moves up
+    // Position range: [-22980, MAX_TICK] - upper tick at max ensures swap won't exit the position
+    // Tick spacing is 60, so ticks must be multiples of 60
+    let lower_tick = -22980;
+    let upper_tick = Tick::get_max_tick(TICK_SPACING);
+    let position_liquidity = 40000u128;
+
+    let mint_event = create_mint_event(lp_address(), lower_tick, upper_tick, position_liquidity);
+    uni_pool_profiler
+        .process(&DexPoolData::LiquidityUpdate(mint_event))
+        .unwrap();
+
+    // Position is inactive (below current price), so active liquidity unchanged
+    assert_eq!(uni_pool_profiler.get_active_liquidity(), initial_liquidity);
+    assert_eq!(uni_pool_profiler.get_total_active_positions(), 1);
+    assert_eq!(uni_pool_profiler.get_total_inactive_positions(), 1);
+
+    // Execute large swap: token1 for token0 to move price up, crossing tick -22980
+    let amount1_in = U256::from(expand_to_18_decimals(1000));
+    let _ = uni_pool_profiler
+        .swap_exact1_for_0(
+            user_address(),
+            user_address(),
+            create_block_position(),
+            amount1_in,
+            None,
+        )
+        .unwrap();
+
+    // Verify price moved up past the lower tick of the position
+    let new_tick = uni_pool_profiler.current_tick.unwrap();
+    assert!(
+        new_tick >= lower_tick,
+        "Price should have crossed above or at tick {}, got {}",
+        lower_tick,
+        new_tick
+    );
+
+    // When crossing tick -22980 upward (cross_tick_up):
+    // - liquidity_net at lower_tick is +40000 (positive, it's lower bound)
+    // - We add it directly: +40000
+    // - Active liquidity should increase by position_liquidity
+    let final_liquidity = uni_pool_profiler.get_active_liquidity();
+    assert_eq!(
+        final_liquidity,
+        initial_liquidity + position_liquidity,
+        "Liquidity should increase when crossing into position range upward"
+    );
+    assert_eq!(
+        uni_pool_profiler.get_active_liquidity(),
+        uni_pool_profiler.get_total_liquidity_from_active_positions(),
+        "Tick map liquidity should match sum of active positions after crossing"
+    );
+
+    // Verify the position is now active
+    assert_eq!(uni_pool_profiler.get_total_active_positions(), 2);
+    assert_eq!(uni_pool_profiler.get_total_inactive_positions(), 0);
 }
 
 // ----------- SWAP TESTING ----------
