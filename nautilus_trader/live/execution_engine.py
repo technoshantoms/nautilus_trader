@@ -129,6 +129,8 @@ class LiveExecutionEngine(ExecutionEngine):
         self._loop: asyncio.AbstractEventLoop = loop
         self._cmd_queue: asyncio.Queue = Queue(maxsize=config.qsize)
         self._evt_queue: asyncio.Queue = Queue(maxsize=config.qsize)
+
+        # Reconciliation
         self._recon_check_retries: Counter[ClientOrderId] = Counter()
         self._ts_last_query: dict[ClientOrderId, int] = {}
         self._order_local_activity_ns: dict[ClientOrderId, int] = {}
@@ -159,6 +161,7 @@ class LiveExecutionEngine(ExecutionEngine):
         self._purge_closed_orders_task: asyncio.Task | None = None
         self._purge_closed_positions_task: asyncio.Task | None = None
         self._purge_account_events_task: asyncio.Task | None = None
+        self._is_shutting_down: bool = False
         self._kill: bool = False
 
         # Configuration
@@ -180,6 +183,8 @@ class LiveExecutionEngine(ExecutionEngine):
         self.open_check_lookback_mins: int = config.open_check_lookback_mins
         self.open_check_threshold_ms: int = config.open_check_threshold_ms
         self.open_check_missing_retries: int = config.open_check_missing_retries
+        self.max_single_order_queries_per_cycle: int = config.max_single_order_queries_per_cycle
+        self.single_order_query_delay_ms: int = config.single_order_query_delay_ms
         self.reconciliation_startup_delay_secs: float = config.reconciliation_startup_delay_secs
         self.purge_closed_orders_interval_mins = config.purge_closed_orders_interval_mins
         self.purge_closed_orders_buffer_mins = config.purge_closed_orders_buffer_mins
@@ -205,6 +210,8 @@ class LiveExecutionEngine(ExecutionEngine):
         self._log.info(f"{config.open_check_lookback_mins=}", LogColor.BLUE)
         self._log.info(f"{config.open_check_threshold_ms=}", LogColor.BLUE)
         self._log.info(f"{config.open_check_missing_retries=}", LogColor.BLUE)
+        self._log.info(f"{config.max_single_order_queries_per_cycle=}", LogColor.BLUE)
+        self._log.info(f"{config.single_order_query_delay_ms=}", LogColor.BLUE)
         self._log.info(f"{config.reconciliation_startup_delay_secs=}", LogColor.BLUE)
         self._log.info(f"{config.purge_closed_orders_interval_mins=}", LogColor.BLUE)
         self._log.info(f"{config.purge_closed_orders_buffer_mins=}", LogColor.BLUE)
@@ -217,7 +224,6 @@ class LiveExecutionEngine(ExecutionEngine):
 
         self._inflight_check_threshold_ns: int = millis_to_nanos(self.inflight_check_threshold_ms)
         self._open_check_threshold_ns: int = millis_to_nanos(self.open_check_threshold_ms)
-        self._shutdown_initiated: bool = False
 
         # Register endpoints
         self._msgbus.register(
@@ -398,14 +404,14 @@ class LiveExecutionEngine(ExecutionEngine):
             e,
         )
         if self.graceful_shutdown_on_exception:
-            if not self._shutdown_initiated:
+            if not self._is_shutting_down:
                 self._log.warning(
                     "Initiating graceful shutdown due to unexpected exception",
                 )
                 self.shutdown_system(
                     f"Unexpected exception in {queue_name} queue processing: {e!r}",
                 )
-                self._shutdown_initiated = True
+                self._is_shutting_down = True
         else:
             self._log.error(
                 "System will terminate immediately to prevent operation in degraded state",
@@ -464,6 +470,7 @@ class LiveExecutionEngine(ExecutionEngine):
 
         # Clear reconciliation event for fresh start cycle
         self._startup_reconciliation_event.clear()
+        self._is_shutting_down = False
 
         self._cmd_queue_task = self._loop.create_task(self._run_cmd_queue(), name="cmd_queue")
         self._evt_queue_task = self._loop.create_task(self._run_evt_queue(), name="evt_queue")
@@ -506,6 +513,8 @@ class LiveExecutionEngine(ExecutionEngine):
             )
 
     def _on_stop(self) -> None:
+        self._is_shutting_down = True
+
         if self._reconciliation_task:
             self._log.debug(f"Canceling task '{self._reconciliation_task.get_name()}'")
             self._reconciliation_task.cancel()
@@ -633,14 +642,14 @@ class LiveExecutionEngine(ExecutionEngine):
         no record of it, which typically means the order was never successfully placed
         or was rejected.
 
-        Before marking as rejected, performs a targeted query to check if the order
+        Before marking as rejected, performs a single-order query to check if the order
         exists but was missed due to API timing/processing delays.
 
         """
         ts_now = self._clock.timestamp_ns()
 
         self._log.debug(
-            f"Performing targeted query for {order.client_order_id!r} before marking as REJECTED",
+            f"Performing single-order query for {order.client_order_id!r} before marking as REJECTED",
             LogColor.BLUE,
         )
 
@@ -812,6 +821,10 @@ class LiveExecutionEngine(ExecutionEngine):
                 )
 
             while True:
+                if self._is_shutting_down:
+                    self._log.debug("Reconciliation loop exiting due to stop signal")
+                    break
+
                 ts_now = self._clock.timestamp_ns()
 
                 # Higher-frequency in-flight check (if configured)
@@ -819,6 +832,9 @@ class LiveExecutionEngine(ExecutionEngine):
                     inflight_check_interval_ns > 0
                     and ts_now - ts_last_inflight_check >= inflight_check_interval_ns
                 ):
+                    # Check stop signal before starting check
+                    if self._is_shutting_down:
+                        break
                     try:
                         await self._check_inflight_orders()
                         ts_last_inflight_check = ts_now
@@ -830,6 +846,9 @@ class LiveExecutionEngine(ExecutionEngine):
                     consistency_check_interval_ns > 0
                     and ts_now - ts_last_consistency_check >= consistency_check_interval_ns
                 ):
+                    # Check stop signal before starting check
+                    if self._is_shutting_down:
+                        break
                     try:
                         await self._check_orders_consistency()
                         ts_last_consistency_check = ts_now
@@ -841,6 +860,10 @@ class LiveExecutionEngine(ExecutionEngine):
             self._log.debug("Canceled task 'continuous_reconciliation'")
 
     async def _check_inflight_orders(self) -> None:
+        if self._is_shutting_down:
+            self._log.debug("Skipping in-flight orders check due to stop signal")
+            return
+
         self._log.debug("Checking in-flight orders status")
 
         delayed_orders: list[Order] = []
@@ -904,6 +927,10 @@ class LiveExecutionEngine(ExecutionEngine):
 
     async def _check_orders_consistency(self) -> None:
         try:
+            if self._is_shutting_down:
+                self._log.debug("Skipping order consistency check due to stop signal")
+                return
+
             self._log.debug("Checking order consistency between cached-state and venues")
 
             open_order_ids: set[ClientOrderId] = self._cache.client_order_ids_open()
@@ -1032,6 +1059,10 @@ class LiveExecutionEngine(ExecutionEngine):
             missing_at_venue: set[ClientOrderId] = open_order_ids - venue_reported_ids
             ts_now = self._clock.timestamp_ns()
 
+            # Track targeted queries to prevent rate limit exhaustion
+            targeted_queries_count = 0
+            logged_limit_warning = False
+
             for client_order_id in missing_at_venue:
                 order = self._cache.order(client_order_id)
                 if order is None:
@@ -1058,12 +1089,43 @@ class LiveExecutionEngine(ExecutionEngine):
 
                 retries = self._recon_check_retries.get(client_order_id, 0)
                 if retries >= self.open_check_missing_retries:
+                    if targeted_queries_count >= self.max_single_order_queries_per_cycle:
+                        self._recon_check_retries[client_order_id] = retries + 1
+
+                        if not logged_limit_warning:
+                            # Count how many orders at threshold are being deferred
+                            orders_at_threshold_remaining = (
+                                sum(
+                                    1
+                                    for cid in missing_at_venue
+                                    if self._recon_check_retries.get(cid, 0)
+                                    >= self.open_check_missing_retries
+                                )
+                                - targeted_queries_count
+                            )
+                            self._log.warning(
+                                f"Reached max single-order queries ({self.max_single_order_queries_per_cycle}) "
+                                f"this cycle, deferring {orders_at_threshold_remaining} order(s) at threshold to next cycle",
+                                LogColor.YELLOW,
+                            )
+                            logged_limit_warning = True
+
+                        continue  # Skip query but continue processing other orders
+
                     self._log.warning(
-                        f"Order {client_order_id!r} not found at venue after {retries} retries, performing targeted query",
+                        f"Order {client_order_id!r} not found at venue after {retries} retries, performing single-order query",
                         LogColor.YELLOW,
                     )
                     self._clear_recon_tracking(client_order_id, drop_last_query=False)
                     await self._resolve_order_not_found_at_venue(order)
+                    targeted_queries_count += 1
+
+                    # Add delay between single-order queries (skip after final query)
+                    if (
+                        targeted_queries_count < self.max_single_order_queries_per_cycle
+                        and self.single_order_query_delay_ms > 0
+                    ):
+                        await asyncio.sleep(self.single_order_query_delay_ms / 1000.0)
                 else:
                     self._recon_check_retries[client_order_id] = retries + 1
                     self._log.debug(

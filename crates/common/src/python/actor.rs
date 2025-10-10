@@ -31,7 +31,7 @@ use nautilus_core::{
 };
 #[cfg(feature = "defi")]
 use nautilus_model::defi::{
-    Block, Blockchain, Pool, PoolFeeCollect, PoolLiquidityUpdate, PoolSwap,
+    Block, Blockchain, Pool, PoolFeeCollect, PoolFlash, PoolLiquidityUpdate, PoolSwap,
 };
 use nautilus_model::{
     data::{
@@ -56,7 +56,7 @@ use crate::{
     clock::Clock,
     component::Component,
     enums::ComponentState,
-    python::{clock::PyClock, logging::PyLogger},
+    python::{cache::PyCache, clock::PyClock, logging::PyLogger},
     signal::Signal,
     timer::{TimeEvent, TimeEventCallback},
 };
@@ -216,8 +216,7 @@ impl PyDataActor {
     ///
     /// # Errors
     ///
-    /// This function will return an error if the actor is already registered
-    /// or if the registration process fails.
+    /// Returns an error if the actor is already registered or if the registration process fails.
     pub fn register(
         &mut self,
         trader_id: TraderId,
@@ -393,6 +392,12 @@ impl DataActor for PyDataActor {
             .map_err(|e| anyhow::anyhow!("Python on_pool_fee_collect failed: {e}"))
     }
 
+    #[cfg(feature = "defi")]
+    fn on_pool_flash(&mut self, flash: &PoolFlash) -> anyhow::Result<()> {
+        self.py_on_pool_flash(flash.clone())
+            .map_err(|e| anyhow::anyhow!("Python on_pool_flash failed: {e}"))
+    }
+
     fn on_historical_data(&mut self, _data: &dyn Any) -> anyhow::Result<()> {
         Python::attach(|py| {
             let py_data = py.None();
@@ -447,6 +452,18 @@ impl PyDataActor {
             ))
         } else {
             Ok(self.clock.clone())
+        }
+    }
+
+    #[getter]
+    #[pyo3(name = "cache")]
+    fn py_cache(&self) -> PyResult<PyCache> {
+        if !self.core.is_registered() {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Actor must be registered with a trader before accessing cache",
+            ))
+        } else {
+            Ok(PyCache::from_rc(self.core.cache_rc()))
         }
     }
 
@@ -841,6 +858,19 @@ impl PyDataActor {
         Ok(())
     }
 
+    #[cfg(feature = "defi")]
+    #[allow(unused_variables)]
+    #[pyo3(name = "on_pool_flash")]
+    fn py_on_pool_flash(&mut self, flash: PoolFlash) -> PyResult<()> {
+        // Dispatch to Python instance's on_pool_flash method if available
+        if let Some(ref py_self) = self.py_self {
+            Python::attach(|py| {
+                py_self.call_method1(py, "on_pool_flash", (flash.into_py_any_unwrap(py),))
+            })?;
+        }
+        Ok(())
+    }
+
     #[pyo3(name = "subscribe_data")]
     #[pyo3(signature = (data_type, client_id=None, params=None))]
     fn py_subscribe_data(
@@ -1003,6 +1033,13 @@ impl PyDataActor {
         Ok(())
     }
 
+    #[pyo3(name = "subscribe_order_fills")]
+    #[pyo3(signature = (instrument_id))]
+    fn py_subscribe_order_fills(&mut self, instrument_id: InstrumentId) -> PyResult<()> {
+        self.subscribe_order_fills(instrument_id);
+        Ok(())
+    }
+
     #[cfg(feature = "defi")]
     #[pyo3(name = "subscribe_blocks")]
     #[pyo3(signature = (chain, client_id=None, params=None))]
@@ -1065,6 +1102,19 @@ impl PyDataActor {
         params: Option<IndexMap<String, String>>,
     ) -> PyResult<()> {
         self.subscribe_pool_fee_collects(instrument_id, client_id, params);
+        Ok(())
+    }
+
+    #[cfg(feature = "defi")]
+    #[pyo3(name = "subscribe_pool_flash_events")]
+    #[pyo3(signature = (instrument_id, client_id=None, params=None))]
+    fn py_subscribe_pool_flash_events(
+        &mut self,
+        instrument_id: InstrumentId,
+        client_id: Option<ClientId>,
+        params: Option<IndexMap<String, String>>,
+    ) -> PyResult<()> {
+        self.subscribe_pool_flash_events(instrument_id, client_id, params);
         Ok(())
     }
 
@@ -1355,6 +1405,13 @@ impl PyDataActor {
         Ok(())
     }
 
+    #[pyo3(name = "unsubscribe_order_fills")]
+    #[pyo3(signature = (instrument_id))]
+    fn py_unsubscribe_order_fills(&mut self, instrument_id: InstrumentId) -> PyResult<()> {
+        self.unsubscribe_order_fills(instrument_id);
+        Ok(())
+    }
+
     #[cfg(feature = "defi")]
     #[pyo3(name = "unsubscribe_blocks")]
     #[pyo3(signature = (chain, client_id=None, params=None))]
@@ -1417,6 +1474,19 @@ impl PyDataActor {
         params: Option<IndexMap<String, String>>,
     ) -> PyResult<()> {
         self.unsubscribe_pool_fee_collects(instrument_id, client_id, params);
+        Ok(())
+    }
+
+    #[cfg(feature = "defi")]
+    #[pyo3(name = "unsubscribe_pool_flash_events")]
+    #[pyo3(signature = (instrument_id, client_id=None, params=None))]
+    fn py_unsubscribe_pool_flash_events(
+        &mut self,
+        instrument_id: InstrumentId,
+        client_id: Option<ClientId>,
+        params: Option<IndexMap<String, String>>,
+    ) -> PyResult<()> {
+        self.unsubscribe_pool_flash_events(instrument_id, client_id, params);
         Ok(())
     }
 

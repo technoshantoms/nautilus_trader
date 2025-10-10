@@ -118,6 +118,8 @@ pub struct DataEngine {
     config: DataEngineConfig,
     #[cfg(feature = "defi")]
     pool_updaters: AHashMap<InstrumentId, Rc<crate::engine::pool::PoolUpdater>>,
+    #[cfg(feature = "defi")]
+    pool_updaters_pending: AHashSet<InstrumentId>,
 }
 
 impl DataEngine {
@@ -157,6 +159,8 @@ impl DataEngine {
             config,
             #[cfg(feature = "defi")]
             pool_updaters: AHashMap::new(),
+            #[cfg(feature = "defi")]
+            pool_updaters_pending: AHashSet::new(),
         }
     }
 
@@ -506,6 +510,13 @@ impl DataEngine {
         self.collect_subscriptions(|client| &client.subscriptions_pool_fee_collects)
     }
 
+    #[cfg(feature = "defi")]
+    /// Returns all instrument IDs for which flash loan subscriptions exist.
+    #[must_use]
+    pub fn subscribed_pool_flash(&self) -> Vec<InstrumentId> {
+        self.collect_subscriptions(|client| &client.subscriptions_pool_flash)
+    }
+
     // -- COMMANDS --------------------------------------------------------------------------------
 
     /// Executes a `DataCommand` by delegating to subscribe, unsubscribe, or request handlers.
@@ -593,11 +604,15 @@ impl DataEngine {
             DefiSubscribeCommand::PoolFeeCollects(cmd) => {
                 self.setup_pool_updater(&cmd.instrument_id);
             }
+            DefiSubscribeCommand::PoolFlashEvents(cmd) => {
+                self.setup_pool_updater(&cmd.instrument_id);
+            }
             _ => {}
         }
 
         // Forward command to client
         if let Some(client) = self.get_client(cmd.client_id(), cmd.venue()) {
+            log::info!("Forwarding subscription to client {:?}", cmd.client_id());
             client.execute_defi_subscribe(cmd);
         } else {
             log::error!(
@@ -766,6 +781,15 @@ impl DataEngine {
                     log::error!("Failed to add Pool to cache: {e}");
                 }
 
+                // Check if pool profiler creation was deferred
+                if self.pool_updaters_pending.remove(&pool.instrument_id) {
+                    log::info!(
+                        "Pool {} now loaded, creating deferred pool profiler",
+                        pool.instrument_id
+                    );
+                    self.setup_pool_updater(&pool.instrument_id);
+                }
+
                 let topic = switchboard::get_defi_pool_topic(pool.instrument_id);
                 msgbus::publish(topic, &pool as &dyn Any);
             }
@@ -780,6 +804,10 @@ impl DataEngine {
             DefiData::PoolFeeCollect(collect) => {
                 let topic = switchboard::get_defi_collect_topic(collect.instrument_id());
                 msgbus::publish(topic, &collect as &dyn Any);
+            }
+            DefiData::PoolFlash(flash) => {
+                let topic = switchboard::get_defi_flash_topic(flash.instrument_id());
+                msgbus::publish(topic, &flash as &dyn Any);
             }
         }
     }
@@ -1299,8 +1327,54 @@ impl DataEngine {
 
     #[cfg(feature = "defi")]
     fn setup_pool_updater(&mut self, instrument_id: &InstrumentId) {
+        use std::sync::Arc;
+
+        use nautilus_model::defi::PoolProfiler;
+
+        log::info!("Setting up pool updater for {instrument_id}");
+
         if self.pool_updaters.contains_key(instrument_id) {
+            log::debug!("Pool updater for {instrument_id} already exists");
             return;
+        }
+
+        {
+            let mut cache = self.cache.borrow_mut();
+
+            // Check if profiler already exists in cache
+            if cache.pool_profiler(instrument_id).is_some() {
+                log::debug!("Pool profiler for {instrument_id} already exists in cache");
+            } else {
+                // Check if pool exists in cache, otherwise defer profiler creation
+                let pool = match cache.pool(instrument_id) {
+                    Some(pool) => pool,
+                    None => {
+                        log::info!(
+                            "Pool {instrument_id} not yet in cache, deferring profiler creation until pool loads"
+                        );
+                        self.pool_updaters_pending.insert(*instrument_id);
+                        return;
+                    }
+                };
+
+                let pool = Arc::new(pool.clone());
+                let mut pool_profiler = PoolProfiler::new(pool.clone());
+
+                // Initialize profiler if pool has initial price set
+                if let Some(initial_sqrt_price_x96) = pool.initial_sqrt_price_x96 {
+                    pool_profiler.initialize(initial_sqrt_price_x96);
+                    log::debug!(
+                        "Initialized pool profiler for {instrument_id} with sqrt_price {initial_sqrt_price_x96}"
+                    );
+                } else {
+                    log::debug!("Created pool profiler for {instrument_id}");
+                }
+
+                if let Err(e) = cache.add_pool_profiler(pool_profiler) {
+                    log::error!("Failed to add pool profiler {instrument_id}: {e}");
+                    return;
+                }
+            }
         }
 
         let updater = Rc::new(PoolUpdater::new(instrument_id, self.cache.clone()));
@@ -1327,7 +1401,16 @@ impl DataEngine {
 
         let collect_topic = switchboard::get_defi_collect_topic(*instrument_id);
         if !msgbus::is_subscribed(collect_topic.as_str(), handler.clone()) {
-            msgbus::subscribe(collect_topic.into(), handler, Some(self.msgbus_priority));
+            msgbus::subscribe(
+                collect_topic.into(),
+                handler.clone(),
+                Some(self.msgbus_priority),
+            );
+        }
+
+        let flash_topic = switchboard::get_defi_flash_topic(*instrument_id);
+        if !msgbus::is_subscribed(flash_topic.as_str(), handler.clone()) {
+            msgbus::subscribe(flash_topic.into(), handler, Some(self.msgbus_priority));
         }
 
         self.pool_updaters.insert(*instrument_id, updater);

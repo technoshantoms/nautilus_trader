@@ -22,8 +22,9 @@ use common::mocks::MockDataClient;
 #[cfg(feature = "defi")]
 use nautilus_common::messages::defi::{
     DefiSubscribeCommand, DefiUnsubscribeCommand, SubscribeBlocks, SubscribePoolFeeCollects,
-    SubscribePoolLiquidityUpdates, SubscribePoolSwaps, UnsubscribeBlocks,
-    UnsubscribePoolFeeCollects, UnsubscribePoolLiquidityUpdates, UnsubscribePoolSwaps,
+    SubscribePoolFlashEvents, SubscribePoolLiquidityUpdates, SubscribePoolSwaps, UnsubscribeBlocks,
+    UnsubscribePoolFeeCollects, UnsubscribePoolFlashEvents, UnsubscribePoolLiquidityUpdates,
+    UnsubscribePoolSwaps,
 };
 use nautilus_common::{
     cache::Cache,
@@ -63,7 +64,7 @@ use nautilus_model::{
 use nautilus_model::{
     defi::{
         Block, Blockchain, DefiData, Pool, PoolLiquidityUpdate, PoolLiquidityUpdateType,
-        PoolProfiler, PoolSwap, Token, data::PoolFeeCollect,
+        PoolProfiler, PoolSwap, Token, data::PoolFeeCollect, data::PoolFlash,
     },
     enums::OrderSide,
     types::Quantity,
@@ -2089,6 +2090,61 @@ fn test_execute_subscribe_pool_fee_collects(
 
 #[cfg(feature = "defi")]
 #[rstest]
+fn test_execute_subscribe_pool_flash_events(
+    data_engine: Rc<RefCell<DataEngine>>,
+    clock: Rc<RefCell<TestClock>>,
+    cache: Rc<RefCell<Cache>>,
+    client_id: ClientId,
+    venue: Venue,
+) {
+    let mut data_engine = data_engine.borrow_mut();
+    let recorder: Rc<RefCell<Vec<DataCommand>>> = Rc::new(RefCell::new(Vec::new()));
+    register_mock_client(
+        clock,
+        cache,
+        client_id,
+        venue,
+        None,
+        &recorder,
+        &mut data_engine,
+    );
+
+    let instrument_id =
+        InstrumentId::from("0x11b815efB8f581194ae79006d24E0d814B7697F6.Arbitrum:UniswapV3");
+
+    let sub_cmd = DataCommand::DefiSubscribe(DefiSubscribeCommand::PoolFlashEvents(
+        SubscribePoolFlashEvents {
+            instrument_id,
+            client_id: Some(client_id),
+            command_id: UUID4::new(),
+            ts_init: UnixNanos::default(),
+            params: None,
+        },
+    ));
+    data_engine.execute(&sub_cmd);
+
+    assert!(data_engine.subscribed_pool_flash().contains(&instrument_id));
+    {
+        assert_eq!(recorder.borrow().as_slice(), &[sub_cmd.clone()]);
+    }
+
+    let unsub_cmd = DataCommand::DefiUnsubscribe(DefiUnsubscribeCommand::PoolFlashEvents(
+        UnsubscribePoolFlashEvents {
+            instrument_id,
+            client_id: Some(client_id),
+            command_id: UUID4::new(),
+            ts_init: UnixNanos::default(),
+            params: None,
+        },
+    ));
+    data_engine.execute(&unsub_cmd);
+
+    assert!(!data_engine.subscribed_pool_flash().contains(&instrument_id));
+    assert_eq!(recorder.borrow().as_slice(), &[sub_cmd, unsub_cmd]);
+}
+
+#[cfg(feature = "defi")]
+#[rstest]
 fn test_process_pool_liquidity_update(
     data_engine: Rc<RefCell<DataEngine>>,
     data_client: DataClientAdapter,
@@ -2271,6 +2327,96 @@ fn test_process_pool_fee_collect(
     assert_eq!(messages.len(), 1);
     assert!(messages.contains(&collect));
 }
+
+#[cfg(feature = "defi")]
+#[rstest]
+fn test_process_pool_flash(data_engine: Rc<RefCell<DataEngine>>, data_client: DataClientAdapter) {
+    let client_id = data_client.client_id;
+    data_engine.borrow_mut().register_client(data_client, None);
+
+    // Create test pool
+    let chain = Arc::new(chains::ETHEREUM.clone());
+    let dex = Arc::new(Dex::new(
+        chains::ETHEREUM.clone(),
+        DexType::UniswapV3,
+        "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+        0,
+        AmmType::CLAMM,
+        "PoolCreated",
+        "Swap",
+        "Mint",
+        "Burn",
+        "Collect",
+    ));
+    let token0 = Token::new(
+        chain.clone(),
+        Address::from([0x11; 20]),
+        "WETH".to_string(),
+        "WETH".to_string(),
+        18,
+    );
+    let token1 = Token::new(
+        chain.clone(),
+        Address::from([0x22; 20]),
+        "USDC".to_string(),
+        "USDC".to_string(),
+        6,
+    );
+    let pool = Pool::new(
+        chain.clone(),
+        dex.clone(),
+        Address::from([0x12; 20]),
+        0u64,
+        token0,
+        token1,
+        Some(500u32),
+        Some(10u32),
+        UnixNanos::from(1),
+    );
+
+    let instrument_id = pool.instrument_id;
+
+    let flash = PoolFlash::new(
+        chain,
+        dex,
+        pool.address,
+        1000u64,
+        "0x123".to_string(),
+        0,
+        0,
+        None,
+        Address::from([0x12; 20]),
+        Address::from([0x34; 20]),
+        U256::from(1000000u128),
+        U256::from(500000u128),
+        U256::from(5000u128),
+        U256::from(2500u128),
+    );
+
+    let sub = DefiSubscribeCommand::PoolFlashEvents(SubscribePoolFlashEvents {
+        instrument_id,
+        client_id: Some(client_id),
+        command_id: UUID4::new(),
+        ts_init: UnixNanos::default(),
+        params: None,
+    });
+    let cmd = DataCommand::DefiSubscribe(sub);
+
+    let endpoint = MessagingSwitchboard::data_engine_execute();
+    msgbus::send_any(endpoint, &cmd as &dyn Any);
+
+    let handler = get_message_saving_handler::<PoolFlash>(None);
+    let topic = switchboard::get_defi_flash_topic(instrument_id);
+    msgbus::subscribe_topic(topic, handler.clone(), None);
+
+    let mut data_engine = data_engine.borrow_mut();
+    data_engine.process_defi_data(DefiData::PoolFlash(flash.clone()));
+    let messages = get_saved_messages::<PoolFlash>(handler);
+
+    assert_eq!(messages.len(), 1);
+    assert!(messages.contains(&flash));
+}
+
 // -- POOL UPDATER INTEGRATION TESTS ----------------------------------------------------------
 
 #[cfg(feature = "defi")]
@@ -2311,7 +2457,7 @@ fn test_pool_updater_processes_swap_updates_profiler(
         "USDC".to_string(),
         6,
     );
-    let pool = Pool::new(
+    let mut pool = Pool::new(
         chain.clone(),
         dex.clone(),
         Address::from([0x12; 20]),
@@ -2323,13 +2469,14 @@ fn test_pool_updater_processes_swap_updates_profiler(
         UnixNanos::from(1),
     );
 
+    let initial_price = U160::from(79228162514264337593543950336u128); // sqrt(1) * 2^96
+    pool.initialize(initial_price);
     let instrument_id = pool.instrument_id;
 
     // Add pool to cache and create profiler
     let shared_pool = Arc::new(pool.clone());
     cache.borrow_mut().add_pool(pool).unwrap();
     let mut profiler = PoolProfiler::new(shared_pool);
-    let initial_price = U160::from(79228162514264337593543950336u128); // sqrt(1) * 2^96
     profiler.initialize(initial_price);
 
     // Add liquidity so swaps can be processed
@@ -2372,12 +2519,13 @@ fn test_pool_updater_processes_swap_updates_profiler(
         .borrow()
         .pool_profiler(&instrument_id)
         .unwrap()
+        .state
         .current_tick;
     let initial_fee_growth_0 = cache
         .borrow()
         .pool_profiler(&instrument_id)
         .unwrap()
-        .tick_map
+        .state
         .fee_growth_global_0;
 
     // Subscribe to pool swaps (this creates PoolUpdater and subscribes to topic)
@@ -2423,12 +2571,13 @@ fn test_pool_updater_processes_swap_updates_profiler(
         .borrow()
         .pool_profiler(&instrument_id)
         .unwrap()
+        .state
         .current_tick;
     let final_fee_growth_0 = cache
         .borrow()
         .pool_profiler(&instrument_id)
         .unwrap()
-        .tick_map
+        .state
         .fee_growth_global_0;
 
     // Verify profiler was updated - either tick changed OR fees were collected
@@ -2487,7 +2636,7 @@ fn test_pool_updater_processes_mint_updates_profiler(
         "USDC".to_string(),
         6,
     );
-    let pool = Pool::new(
+    let mut pool = Pool::new(
         chain.clone(),
         dex.clone(),
         Address::from([0x12; 20]),
@@ -2499,13 +2648,14 @@ fn test_pool_updater_processes_mint_updates_profiler(
         UnixNanos::from(1),
     );
 
+    let initial_price = U160::from(79228162514264337593543950336u128);
+    pool.initialize(initial_price);
     let instrument_id = pool.instrument_id;
 
     // Add pool to cache and create profiler
     let shared_pool = Arc::new(pool.clone());
     cache.borrow_mut().add_pool(pool).unwrap();
     let mut profiler = PoolProfiler::new(shared_pool);
-    let initial_price = U160::from(79228162514264337593543950336u128);
     profiler.initialize(initial_price);
     cache.borrow_mut().add_pool_profiler(profiler).unwrap();
 
@@ -2604,7 +2754,7 @@ fn test_pool_updater_processes_burn_updates_profiler(
         "USDC".to_string(),
         6,
     );
-    let pool = Pool::new(
+    let mut pool = Pool::new(
         chain.clone(),
         dex.clone(),
         Address::from([0x12; 20]),
@@ -2616,13 +2766,14 @@ fn test_pool_updater_processes_burn_updates_profiler(
         UnixNanos::from(1),
     );
 
+    let initial_price = U160::from(79228162514264337593543950336u128);
+    pool.initialize(initial_price);
     let instrument_id = pool.instrument_id;
 
     // Add pool to cache and create profiler
     let shared_pool = Arc::new(pool.clone());
     cache.borrow_mut().add_pool(pool).unwrap();
     let mut profiler = PoolProfiler::new(shared_pool);
-    let initial_price = U160::from(79228162514264337593543950336u128);
     profiler.initialize(initial_price);
 
     // First mint some liquidity
@@ -2743,7 +2894,7 @@ fn test_pool_updater_processes_collect_updates_profiler(
         "USDC".to_string(),
         6,
     );
-    let pool = Pool::new(
+    let mut pool = Pool::new(
         chain.clone(),
         dex.clone(),
         Address::from([0x12; 20]),
@@ -2755,13 +2906,14 @@ fn test_pool_updater_processes_collect_updates_profiler(
         UnixNanos::from(1),
     );
 
+    let initial_price = U160::from(79228162514264337593543950336u128);
+    pool.initialize(initial_price);
     let instrument_id = pool.instrument_id;
 
     // Add pool to cache and create profiler
     let shared_pool = Arc::new(pool.clone());
     cache.borrow_mut().add_pool(pool).unwrap();
     let mut profiler = PoolProfiler::new(shared_pool);
-    let initial_price = U160::from(79228162514264337593543950336u128);
     profiler.initialize(initial_price);
     cache.borrow_mut().add_pool_profiler(profiler).unwrap();
 
@@ -2805,8 +2957,116 @@ fn test_pool_updater_processes_collect_updates_profiler(
         .borrow()
         .pool_profiler(&instrument_id)
         .unwrap()
-        .current_tick
-        .is_some();
+        .is_initialized;
+
+    // PoolProfiler should still be valid and initialized
+    assert!(is_initialized, "PoolProfiler should remain initialized");
+}
+
+#[cfg(feature = "defi")]
+#[rstest]
+fn test_pool_updater_processes_flash_updates_profiler(
+    data_engine: Rc<RefCell<DataEngine>>,
+    data_client: DataClientAdapter,
+) {
+    let client_id = data_client.client_id;
+    let cache = data_engine.borrow().cache_rc();
+    data_engine.borrow_mut().register_client(data_client, None);
+
+    // Create pool test data
+    let chain = Arc::new(chains::ARBITRUM.clone());
+    let dex = Arc::new(Dex::new(
+        chains::ARBITRUM.clone(),
+        DexType::UniswapV3,
+        "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+        0,
+        AmmType::CLAMM,
+        "PoolCreated",
+        "Swap",
+        "Mint",
+        "Burn",
+        "Collect",
+    ));
+    let token0 = Token::new(
+        chain.clone(),
+        Address::from([0x11; 20]),
+        "WETH".to_string(),
+        "WETH".to_string(),
+        18,
+    );
+    let token1 = Token::new(
+        chain.clone(),
+        Address::from([0x22; 20]),
+        "USDC".to_string(),
+        "USDC".to_string(),
+        6,
+    );
+    let mut pool = Pool::new(
+        chain.clone(),
+        dex.clone(),
+        Address::from([0x12; 20]),
+        0u64,
+        token0,
+        token1,
+        Some(500u32),
+        Some(10u32),
+        UnixNanos::from(1),
+    );
+
+    let initial_price = U160::from(79228162514264337593543950336u128);
+    pool.initialize(initial_price);
+    let instrument_id = pool.instrument_id;
+
+    // Add pool to cache and create profiler
+    let shared_pool = Arc::new(pool.clone());
+    cache.borrow_mut().add_pool(pool).unwrap();
+    let mut profiler = PoolProfiler::new(shared_pool);
+    profiler.initialize(initial_price);
+    cache.borrow_mut().add_pool_profiler(profiler).unwrap();
+
+    // Subscribe to pool flash events
+    let sub = DefiSubscribeCommand::PoolFlashEvents(SubscribePoolFlashEvents {
+        instrument_id,
+        client_id: Some(client_id),
+        command_id: UUID4::new(),
+        ts_init: UnixNanos::default(),
+        params: None,
+    });
+    let cmd = DataCommand::DefiSubscribe(sub);
+    let endpoint = MessagingSwitchboard::data_engine_execute();
+    msgbus::send_any(endpoint, &cmd as &dyn Any);
+
+    // Create and process flash event
+    let initiator = Address::from([0xAB; 20]);
+    let recipient = Address::from([0xCD; 20]);
+    let flash = PoolFlash::new(
+        chain,
+        dex,
+        Address::from([0x12; 20]),
+        1000u64,
+        "0x123".to_string(),
+        0,
+        0,
+        None,
+        initiator,
+        recipient,
+        U256::from(1000000u128), // amount0
+        U256::from(500000u128),  // amount1
+        U256::from(5000u128),    // paid0
+        U256::from(2500u128),    // paid1
+    );
+
+    let mut data_engine = data_engine.borrow_mut();
+    data_engine.process_defi_data(DefiData::PoolFlash(flash.clone()));
+
+    // Verify profiler state - the flash should be processed without error
+    // The main verification is that PoolUpdater called PoolProfiler.process_flash()
+    // which would have updated flash statistics
+    let is_initialized = cache
+        .borrow()
+        .pool_profiler(&instrument_id)
+        .unwrap()
+        .is_initialized;
 
     // PoolProfiler should still be valid and initialized
     assert!(is_initialized, "PoolProfiler should remain initialized");

@@ -18,7 +18,7 @@
 use nautilus_core::python::to_pyvalue_err;
 use nautilus_model::{
     enums::{OrderSide, OrderType, TimeInForce},
-    identifiers::{ClientOrderId, InstrumentId, VenueOrderId},
+    identifiers::{AccountId, ClientOrderId, InstrumentId, VenueOrderId},
     python::instruments::{instrument_any_to_pyobject, pyobject_to_instrument_any},
     types::{Price, Quantity},
 };
@@ -42,10 +42,14 @@ impl BybitHttpClient {
     ) -> PyResult<Self> {
         let timeout = timeout_secs.or(Some(60));
 
-        if let (Some(key), Some(secret)) = (api_key, api_secret) {
+        // Try to get credentials from parameters or environment variables
+        let key = api_key.or_else(|| std::env::var("BYBIT_API_KEY").ok());
+        let secret = api_secret.or_else(|| std::env::var("BYBIT_API_SECRET").ok());
+
+        if let (Some(k), Some(s)) = (key, secret) {
             Self::with_credentials(
-                key,
-                secret,
+                k,
+                s,
                 base_url,
                 timeout,
                 max_retries,
@@ -84,6 +88,11 @@ impl BybitHttpClient {
         let inst_any = pyobject_to_instrument_any(py, instrument)?;
         self.add_instrument(inst_any);
         Ok(())
+    }
+
+    #[pyo3(name = "cancel_all_requests")]
+    fn py_cancel_all_requests(&self) {
+        self.cancel_all_requests();
     }
 
     #[pyo3(name = "request_instruments")]
@@ -252,12 +261,13 @@ impl BybitHttpClient {
     }
 
     #[pyo3(name = "query_order")]
-    #[pyo3(signature = (product_type, instrument_id, client_order_id=None, venue_order_id=None))]
+    #[pyo3(signature = (product_type, instrument_id, account_id, client_order_id=None, venue_order_id=None))]
     fn py_query_order<'py>(
         &self,
         py: Python<'py>,
         product_type: BybitProductType,
         instrument_id: InstrumentId,
+        account_id: AccountId,
         client_order_id: Option<ClientOrderId>,
         venue_order_id: Option<VenueOrderId>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -265,7 +275,13 @@ impl BybitHttpClient {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             match client
-                .query_order(product_type, instrument_id, client_order_id, venue_order_id)
+                .query_order(
+                    product_type,
+                    instrument_id,
+                    account_id,
+                    client_order_id,
+                    venue_order_id,
+                )
                 .await
             {
                 Ok(Some(report)) => Python::attach(|py| report.into_py_any(py)),
@@ -361,11 +377,13 @@ impl BybitHttpClient {
     }
 
     #[pyo3(name = "request_fill_reports")]
-    #[pyo3(signature = (product_type, instrument_id=None, start=None, end=None, limit=None))]
+    #[pyo3(signature = (product_type, account_id, instrument_id=None, start=None, end=None, limit=None))]
+    #[allow(clippy::too_many_arguments)]
     fn py_request_fill_reports<'py>(
         &self,
         py: Python<'py>,
         product_type: BybitProductType,
+        account_id: AccountId,
         instrument_id: Option<InstrumentId>,
         start: Option<i64>,
         end: Option<i64>,
@@ -375,7 +393,7 @@ impl BybitHttpClient {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let reports = client
-                .request_fill_reports(product_type, instrument_id, start, end, limit)
+                .request_fill_reports(product_type, account_id, instrument_id, start, end, limit)
                 .await
                 .map_err(to_pyvalue_err)?;
 
@@ -391,18 +409,19 @@ impl BybitHttpClient {
     }
 
     #[pyo3(name = "request_position_status_reports")]
-    #[pyo3(signature = (product_type, instrument_id=None))]
+    #[pyo3(signature = (product_type, account_id, instrument_id=None))]
     fn py_request_position_status_reports<'py>(
         &self,
         py: Python<'py>,
         product_type: BybitProductType,
+        account_id: AccountId,
         instrument_id: Option<InstrumentId>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let reports = client
-                .request_position_status_reports(product_type, instrument_id)
+                .request_position_status_reports(product_type, account_id, instrument_id)
                 .await
                 .map_err(to_pyvalue_err)?;
 
@@ -422,12 +441,13 @@ impl BybitHttpClient {
         &self,
         py: Python<'py>,
         account_type: crate::common::enums::BybitAccountType,
+        account_id: AccountId,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let account_state = client
-                .request_account_state(account_type)
+                .request_account_state(account_type, account_id)
                 .await
                 .map_err(to_pyvalue_err)?;
 

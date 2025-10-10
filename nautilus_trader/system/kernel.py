@@ -507,6 +507,7 @@ class NautilusKernel:
                     path=catalog_config.path,
                     fs_protocol=catalog_config.fs_protocol,
                     fs_storage_options=catalog_config.fs_storage_options,
+                    fs_rust_storage_options=catalog_config.fs_rust_storage_options,
                 )
                 used_catalog_name = catalog_config.name
 
@@ -1101,6 +1102,11 @@ class NautilusKernel:
         Calling this method multiple times has the same effect as calling it once (it is
         idempotent). Once called, it cannot be reversed, and no other methods should be
         called on this instance.
+
+        Notes
+        -----
+        The log guard is intentionally not disposed to support running multiple engines
+        sequentially without re-initializing logging.
 
         """
         self._stop_engines()

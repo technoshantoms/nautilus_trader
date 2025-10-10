@@ -574,7 +574,7 @@ pub fn parse_position_status_report(
 ///
 /// # Errors
 ///
-/// This function will return an error if the OKX transaction detail cannot be parsed.
+/// Returns an error if the OKX transaction detail cannot be parsed.
 pub fn parse_fill_report(
     detail: OKXTransactionDetail,
     account_id: AccountId,
@@ -1365,9 +1365,7 @@ pub fn parse_account_state(
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{
-        enums::AggregationSource, identifiers::InstrumentId, instruments::Instrument,
-    };
+    use nautilus_model::instruments::Instrument;
     use rstest::rstest;
 
     use super::*;

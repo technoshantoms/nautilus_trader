@@ -28,7 +28,9 @@ use alloy::primitives::Address;
 use nautilus_core::UnixNanos;
 use nautilus_model::defi::{
     Block, DexType, Pool, PoolLiquidityUpdate, PoolSwap, SharedChain, SharedDex, SharedPool, Token,
-    data::PoolFeeCollect, pool_analysis::position::PoolPosition,
+    data::{PoolFeeCollect, PoolFlash},
+    pool_analysis::{position::PoolPosition, snapshot::PoolSnapshot},
+    tick_map::tick::Tick,
 };
 use sqlx::postgres::PgConnectOptions;
 
@@ -204,10 +206,14 @@ impl BlockchainCache {
 
     /// Loads DEX exchange pools from the database into the in-memory cache.
     ///
+    /// Returns the loaded pools.
+    ///
     /// # Errors
     ///
     /// Returns an error if the DEX has not been registered or if database operations fail.
-    pub async fn load_pools(&mut self, dex_id: &DexType) -> anyhow::Result<()> {
+    pub async fn load_pools(&mut self, dex_id: &DexType) -> anyhow::Result<Vec<Pool>> {
+        let mut loaded_pools = Vec::new();
+
         if let Some(database) = &self.database {
             let dex = self
                 .get_dex(dex_id)
@@ -270,11 +276,12 @@ impl BlockchainCache {
                     }
                 }
 
-                // Add pool to cache
+                // Add pool to cache and loaded pools list
+                loaded_pools.push(pool.clone());
                 self.pools.insert(pool.address, Arc::new(pool));
             }
         }
-        Ok(())
+        Ok(loaded_pools)
     }
 
     /// Loads block timestamps from the database starting `from_block` number
@@ -549,19 +556,75 @@ impl BlockchainCache {
         Ok(())
     }
 
-    /// Adds multiple pool positions to the cache database in a single batch operation.
+    /// Adds a batch of pool flash events to the cache.
     ///
     /// # Errors
     ///
-    /// Returns an error if adding the positions to the database fails.
-    pub async fn add_pool_positions_batch(
-        &self,
-        positions: &[(Address, PoolPosition)],
-    ) -> anyhow::Result<()> {
+    /// Returns an error if adding the flash events to the database fails.
+    pub async fn add_pool_flash_batch(&self, flash_events: &[PoolFlash]) -> anyhow::Result<()> {
         if let Some(database) = &self.database {
             database
-                .add_pool_positions_batch(self.chain.chain_id, positions)
+                .add_pool_flash_batch(self.chain.chain_id, flash_events)
                 .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Adds a pool snapshot to the cache database.
+    ///
+    /// This method saves the complete snapshot including:
+    /// - Pool state and analytics (pool_snapshot table)
+    /// - All positions at this snapshot (pool_position table)
+    /// - All ticks at this snapshot (pool_tick table)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if adding the snapshot to the database fails.
+    pub async fn add_pool_snapshot(
+        &self,
+        pool_address: &Address,
+        snapshot: &PoolSnapshot,
+    ) -> anyhow::Result<()> {
+        if let Some(database) = &self.database {
+            // Save snapshot first (required for foreign key constraints)
+            database
+                .add_pool_snapshot(self.chain.chain_id, pool_address, snapshot)
+                .await?;
+
+            let positions: Vec<(Address, PoolPosition)> = snapshot
+                .positions
+                .iter()
+                .map(|pos| (*pool_address, pos.clone()))
+                .collect();
+            if !positions.is_empty() {
+                database
+                    .add_pool_positions_batch(
+                        self.chain.chain_id,
+                        snapshot.block_position.number,
+                        snapshot.block_position.transaction_index,
+                        snapshot.block_position.log_index,
+                        &positions,
+                    )
+                    .await?;
+            }
+
+            let ticks: Vec<(Address, &Tick)> = snapshot
+                .ticks
+                .iter()
+                .map(|tick| (*pool_address, tick))
+                .collect();
+            if !ticks.is_empty() {
+                database
+                    .add_pool_ticks_batch(
+                        self.chain.chain_id,
+                        snapshot.block_position.number,
+                        snapshot.block_position.transaction_index,
+                        snapshot.block_position.log_index,
+                        &ticks,
+                    )
+                    .await?;
+            }
         }
 
         Ok(())

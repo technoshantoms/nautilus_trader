@@ -259,7 +259,9 @@ async fn test_get_instruments() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{}", addr);
 
-    let client = BitmexHttpInnerClient::new(Some(base_url), Some(60), None, None, None).unwrap();
+    let client =
+        BitmexHttpInnerClient::new(Some(base_url), Some(60), None, None, None, None, None, None)
+            .unwrap();
     let instruments = client.http_get_instruments(true).await.unwrap();
 
     assert_eq!(instruments.len(), 1);
@@ -272,7 +274,9 @@ async fn test_get_instrument_single_result() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{}", addr);
 
-    let client = BitmexHttpInnerClient::new(Some(base_url), Some(60), None, None, None).unwrap();
+    let client =
+        BitmexHttpInnerClient::new(Some(base_url), Some(60), None, None, None, None, None, None)
+            .unwrap();
     let instrument = client.http_get_instrument("XBTUSD").await.unwrap();
 
     assert!(instrument.is_some());
@@ -294,6 +298,9 @@ async fn test_request_instrument() {
         None,
         None,
         None,
+        None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -312,8 +319,17 @@ async fn test_get_wallet_requires_auth() {
     let base_url = format!("http://{}", addr);
 
     // Test without credentials - should fail
-    let client =
-        BitmexHttpInnerClient::new(Some(base_url.clone()), Some(60), None, None, None).unwrap();
+    let client = BitmexHttpInnerClient::new(
+        Some(base_url.clone()),
+        Some(60),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let result = client.http_get_wallet().await;
     assert!(result.is_err());
 
@@ -323,6 +339,9 @@ async fn test_get_wallet_requires_auth() {
         "test_api_secret".to_string(),
         base_url,
         Some(60),
+        None,
+        None,
+        None,
         None,
         None,
         None,
@@ -343,6 +362,9 @@ async fn test_get_orders() {
         "test_api_secret".to_string(),
         base_url,
         Some(60),
+        None,
+        None,
+        None,
         None,
         None,
         None,
@@ -367,6 +389,9 @@ async fn test_place_order() {
         "test_api_secret".to_string(),
         base_url,
         Some(60),
+        None,
+        None,
+        None,
         None,
         None,
         None,
@@ -405,6 +430,9 @@ async fn test_cancel_order() {
         None,
         None,
         None,
+        None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -433,6 +461,9 @@ async fn test_rate_limiting() {
         "test_api_secret".to_string(),
         base_url,
         Some(60),
+        None,
+        None,
+        None,
         None,
         None,
         None,

@@ -41,6 +41,7 @@ use nautilus_bybit::{
     websocket::client::BybitWebSocketClient,
 };
 use nautilus_common::testing::wait_until_async;
+use nautilus_model::identifiers::InstrumentId;
 use rstest::rstest;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -49,7 +50,9 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 struct TestServerState {
     connection_count: Arc<Mutex<usize>>,
-    subscription_events: Arc<Mutex<Vec<String>>>,
+    subscription_events: Arc<Mutex<Vec<(String, bool)>>>, // (topic, success)
+    fail_next_subscriptions: Arc<Mutex<Vec<String>>>,
+    auth_response_delay_ms: Arc<Mutex<Option<u64>>>,
     authenticated: Arc<AtomicBool>,
     disconnect_trigger: Arc<AtomicBool>,
     ping_count: Arc<AtomicUsize>,
@@ -61,6 +64,8 @@ impl Default for TestServerState {
         Self {
             connection_count: Arc::new(Mutex::new(0)),
             subscription_events: Arc::new(Mutex::new(Vec::new())),
+            fail_next_subscriptions: Arc::new(Mutex::new(Vec::new())),
+            auth_response_delay_ms: Arc::new(Mutex::new(None)),
             authenticated: Arc::new(AtomicBool::new(false)),
             disconnect_trigger: Arc::new(AtomicBool::new(false)),
             ping_count: Arc::new(AtomicUsize::new(0)),
@@ -74,10 +79,32 @@ impl TestServerState {
     async fn reset(&self) {
         *self.connection_count.lock().await = 0;
         self.subscription_events.lock().await.clear();
+        self.fail_next_subscriptions.lock().await.clear();
+        *self.auth_response_delay_ms.lock().await = None;
         self.authenticated.store(false, Ordering::Relaxed);
         self.disconnect_trigger.store(false, Ordering::Relaxed);
         self.ping_count.store(0, Ordering::Relaxed);
         self.pong_count.store(0, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    async fn set_subscription_failures(&self, topics: Vec<String>) {
+        *self.fail_next_subscriptions.lock().await = topics;
+    }
+
+    #[allow(dead_code)]
+    async fn set_auth_delay(&self, delay_ms: u64) {
+        *self.auth_response_delay_ms.lock().await = Some(delay_ms);
+    }
+
+    #[allow(dead_code)]
+    async fn subscription_events(&self) -> Vec<(String, bool)> {
+        self.subscription_events.lock().await.clone()
+    }
+
+    #[allow(dead_code)]
+    async fn clear_subscription_events(&self) {
+        self.subscription_events.lock().await.clear();
     }
 }
 
@@ -134,6 +161,11 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                         }
                     }
                     Some("auth") => {
+                        // Check for auth delay
+                        if let Some(delay_ms) = *state.auth_response_delay_ms.lock().await {
+                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        }
+
                         // Parse auth request
                         let api_key = value
                             .get("args")
@@ -175,32 +207,62 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                     }
                     Some("subscribe") => {
                         let args = value.get("args").and_then(|a| a.as_array());
+                        let mut failed_topics = Vec::new();
+
                         if let Some(topics) = args {
+                            let fail_list = state.fail_next_subscriptions.lock().await.clone();
+
                             for topic in topics {
                                 if let Some(topic_str) = topic.as_str() {
+                                    let should_fail = fail_list.contains(&topic_str.to_string());
+
+                                    // Track the subscription event
                                     state
                                         .subscription_events
                                         .lock()
                                         .await
-                                        .push(topic_str.to_string());
+                                        .push((topic_str.to_string(), !should_fail));
+
+                                    if should_fail {
+                                        failed_topics.push(topic_str);
+                                    }
                                 }
                             }
                         }
 
-                        // Send subscription confirmation
-                        let sub_response = json!({
-                            "success": true,
-                            "ret_msg": "",
-                            "conn_id": "test-conn-id",
-                            "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "op": "subscribe"
-                        });
-                        if socket
-                            .send(Message::Text(sub_response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
+                        // Send subscription response (success or failure)
+                        if failed_topics.is_empty() {
+                            let sub_response = json!({
+                                "success": true,
+                                "ret_msg": "",
+                                "conn_id": "test-conn-id",
+                                "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                "op": "subscribe"
+                            });
+                            if socket
+                                .send(Message::Text(sub_response.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        } else {
+                            // Send failure for failed subscriptions
+                            let error_response = json!({
+                                "success": false,
+                                "ret_msg": format!("Subscription failed for topics: {:?}", failed_topics),
+                                "ret_code": 10001,
+                                "conn_id": "test-conn-id",
+                                "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                "op": "subscribe"
+                            });
+                            if socket
+                                .send(Message::Text(error_response.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
 
                         // Send a sample data message for the first topic
@@ -236,7 +298,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             for topic in topics {
                                 if let Some(topic_str) = topic.as_str() {
                                     let mut events = state.subscription_events.lock().await;
-                                    events.retain(|t| t != topic_str);
+                                    events.retain(|(t, _)| t != topic_str);
                                 }
                             }
                         }
@@ -311,6 +373,31 @@ async fn start_test_server()
     // Give server time to start
     tokio::time::sleep(Duration::from_millis(100)).await;
     Ok((addr, state))
+}
+
+#[allow(dead_code)]
+async fn wait_for_subscription_events<F>(
+    state: &TestServerState,
+    timeout: Duration,
+    mut predicate: F,
+) -> Vec<(String, bool)>
+where
+    F: FnMut(&[(String, bool)]) -> bool,
+{
+    let state_clone = state.clone();
+    let poll = async {
+        loop {
+            let events = state_clone.subscription_events().await;
+            if predicate(&events) {
+                return events;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    match tokio::time::timeout(timeout, poll).await {
+        Ok(events) => events,
+        Err(_) => state.subscription_events().await,
+    }
 }
 
 #[rstest]
@@ -463,7 +550,10 @@ async fn test_subscription_lifecycle() {
     .await;
 
     let subs = state.subscription_events.lock().await.clone();
-    assert!(subs.contains(&"publicTrade.BTCUSDT".to_string()));
+    assert!(
+        subs.iter()
+            .any(|(topic, ok)| topic == "publicTrade.BTCUSDT" && *ok)
+    );
 
     // Unsubscribe
     client.unsubscribe(topics).await.unwrap();
@@ -499,12 +589,14 @@ async fn test_message_routing() {
     let topics = vec!["publicTrade.BTCUSDT".to_string()];
     client.subscribe(topics).await.unwrap();
 
-    // Wait for and verify message
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for subscription to be confirmed
+    wait_until_async(
+        || async { client.subscription_count() > 0 },
+        Duration::from_secs(2),
+    )
+    .await;
 
     // Verify subscription was recorded
-    // Note: The client uses stream() method which takes ownership
-    // For this test, we verify subscriptions were registered
     assert!(client.subscription_count() > 0);
 
     client.close().await.unwrap();
@@ -542,8 +634,8 @@ async fn test_reconnection_flow() {
     // Trigger a server-side disconnect
     state.disconnect_trigger.store(true, Ordering::Relaxed);
 
-    // Give time for disconnect to propagate
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Short delay for disconnect trigger to be observed by server
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Note: Full reconnection testing requires the client to support reconnection
     // This test establishes the pattern for testing reconnection behavior
@@ -583,9 +675,18 @@ async fn test_multiple_subscriptions() {
 
     let subs = state.subscription_events.lock().await.clone();
     assert_eq!(subs.len(), 3);
-    assert!(subs.contains(&"publicTrade.BTCUSDT".to_string()));
-    assert!(subs.contains(&"publicTrade.ETHUSDT".to_string()));
-    assert!(subs.contains(&"orderbook.50.BTCUSDT".to_string()));
+    assert!(
+        subs.iter()
+            .any(|(topic, ok)| topic == "publicTrade.BTCUSDT" && *ok)
+    );
+    assert!(
+        subs.iter()
+            .any(|(topic, ok)| topic == "publicTrade.ETHUSDT" && *ok)
+    );
+    assert!(
+        subs.iter()
+            .any(|(topic, ok)| topic == "orderbook.50.BTCUSDT" && *ok)
+    );
 
     client.close().await.unwrap();
 }
@@ -634,8 +735,8 @@ async fn test_heartbeat_timeout_reconnection() {
     // Trigger disconnect - client should attempt reconnection
     state.disconnect_trigger.store(true, Ordering::Relaxed);
 
-    // Give time for disconnect to propagate
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Short delay for disconnect trigger to be observed by server
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     client.close().await.unwrap();
 }
@@ -723,8 +824,8 @@ async fn test_reauth_after_disconnect() {
     // Trigger disconnect
     state.disconnect_trigger.store(true, Ordering::Relaxed);
 
-    // Give time for disconnect to propagate
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Short delay for disconnect trigger to be observed by server
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let _ = client.close().await;
 }
@@ -810,7 +911,7 @@ async fn test_subscription_after_reconnection() {
     // Trigger disconnect
     state.disconnect_trigger.store(true, Ordering::Relaxed);
 
-    // Give time for disconnect to propagate
+    // Short delay for disconnect trigger to be observed by server
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify subscriptions are tracked
@@ -887,7 +988,7 @@ async fn test_reconnection_retries_failed_subscriptions() {
     // Trigger disconnect
     state.disconnect_trigger.store(true, Ordering::Relaxed);
 
-    // Give time for disconnect to propagate
+    // Short delay for disconnect trigger to be observed by server
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     client.close().await.unwrap();
@@ -909,10 +1010,8 @@ async fn test_trade_subscription_flow() {
     client.connect().await.unwrap();
 
     // Subscribe to trades using the high-level method
-    client
-        .subscribe_trades("BTCUSDT".to_string())
-        .await
-        .unwrap();
+    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    client.subscribe_trades(instrument_id).await.unwrap();
 
     // Wait for subscription
     wait_until_async(
@@ -922,7 +1021,10 @@ async fn test_trade_subscription_flow() {
     .await;
 
     let subs = state.subscription_events.lock().await.clone();
-    assert!(subs.iter().any(|s| s.contains("publicTrade")));
+    assert!(
+        subs.iter()
+            .any(|(topic, ok)| topic.contains("publicTrade") && *ok)
+    );
 
     client.close().await.unwrap();
 }
@@ -943,10 +1045,8 @@ async fn test_orderbook_subscription_flow() {
     client.connect().await.unwrap();
 
     // Subscribe to orderbook using the high-level method
-    client
-        .subscribe_orderbook("BTCUSDT".to_string(), 50)
-        .await
-        .unwrap();
+    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    client.subscribe_orderbook(instrument_id, 50).await.unwrap();
 
     // Wait for subscription
     wait_until_async(
@@ -956,7 +1056,10 @@ async fn test_orderbook_subscription_flow() {
     .await;
 
     let subs = state.subscription_events.lock().await.clone();
-    assert!(subs.iter().any(|s| s.contains("orderbook")));
+    assert!(
+        subs.iter()
+            .any(|(topic, ok)| topic.contains("orderbook") && *ok)
+    );
 
     client.close().await.unwrap();
 }
@@ -977,10 +1080,8 @@ async fn test_ticker_subscription_flow() {
     client.connect().await.unwrap();
 
     // Subscribe to ticker using the high-level method
-    client
-        .subscribe_ticker("BTCUSDT".to_string())
-        .await
-        .unwrap();
+    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    client.subscribe_ticker(instrument_id).await.unwrap();
 
     // Wait for subscription
     wait_until_async(
@@ -990,7 +1091,10 @@ async fn test_ticker_subscription_flow() {
     .await;
 
     let subs = state.subscription_events.lock().await.clone();
-    assert!(subs.iter().any(|s| s.contains("ticker")));
+    assert!(
+        subs.iter()
+            .any(|(topic, ok)| topic.contains("ticker") && *ok)
+    );
 
     client.close().await.unwrap();
 }
@@ -1011,8 +1115,9 @@ async fn test_klines_subscription_flow() {
     client.connect().await.unwrap();
 
     // Subscribe to klines using the high-level method
+    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
     client
-        .subscribe_klines("BTCUSDT".to_string(), "1".to_string())
+        .subscribe_klines(instrument_id, "1".to_string())
         .await
         .unwrap();
 
@@ -1024,7 +1129,10 @@ async fn test_klines_subscription_flow() {
     .await;
 
     let subs = state.subscription_events.lock().await.clone();
-    assert!(subs.iter().any(|s| s.contains("kline")));
+    assert!(
+        subs.iter()
+            .any(|(topic, ok)| topic.contains("kline") && *ok)
+    );
 
     client.close().await.unwrap();
 }
@@ -1114,4 +1222,220 @@ async fn test_private_wallet_subscription() {
     let _ = client.subscribe_wallet().await;
 
     let _ = client.close().await;
+}
+
+// Tests for conditional order types
+#[cfg(test)]
+mod conditional_order_tests {
+    use nautilus_bybit::{
+        common::enums::{BybitOrderSide, BybitOrderType, BybitProductType, BybitTimeInForce},
+        websocket::messages::BybitWsPlaceOrderParams,
+    };
+    use nautilus_model::{enums::OrderType, types::Price};
+
+    #[test]
+    fn test_stop_market_order_uses_trigger_price() {
+        let params = create_conditional_order_params(
+            OrderType::StopMarket,
+            Some(Price::from("4500.00")),
+            None,
+        );
+
+        // Stop orders should use triggerPrice, not sl_trigger_price
+        assert!(params.trigger_price.is_some());
+        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
+        assert!(params.sl_trigger_price.is_none());
+        assert!(params.tp_trigger_price.is_none());
+
+        // Should be Market type at Bybit level
+        assert_eq!(params.order_type, BybitOrderType::Market);
+    }
+
+    #[test]
+    fn test_stop_limit_order_uses_trigger_price() {
+        let params = create_conditional_order_params(
+            OrderType::StopLimit,
+            Some(Price::from("4500.00")),
+            Some(Price::from("4505.00")),
+        );
+
+        // Stop limit orders should use triggerPrice
+        assert!(params.trigger_price.is_some());
+        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
+
+        // Price should be set for limit
+        assert!(params.price.is_some());
+        assert_eq!(params.price.as_ref().unwrap(), "4505.00");
+
+        // Should not use sl/tp fields for standalone stop orders
+        assert!(params.sl_trigger_price.is_none());
+        assert!(params.tp_trigger_price.is_none());
+
+        // Should be Limit type at Bybit level
+        assert_eq!(params.order_type, BybitOrderType::Limit);
+    }
+
+    #[test]
+    fn test_market_if_touched_order_uses_trigger_price() {
+        let params = create_conditional_order_params(
+            OrderType::MarketIfTouched,
+            Some(Price::from("4500.00")),
+            None,
+        );
+
+        // MIT orders should use triggerPrice
+        assert!(params.trigger_price.is_some());
+        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
+        assert!(params.sl_trigger_price.is_none());
+        assert!(params.tp_trigger_price.is_none());
+
+        // Should be Market type at Bybit level
+        assert_eq!(params.order_type, BybitOrderType::Market);
+    }
+
+    #[test]
+    fn test_limit_if_touched_order_uses_trigger_price() {
+        let params = create_conditional_order_params(
+            OrderType::LimitIfTouched,
+            Some(Price::from("4500.00")),
+            Some(Price::from("4505.00")),
+        );
+
+        // LIT orders should use triggerPrice
+        assert!(params.trigger_price.is_some());
+        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
+        assert!(params.sl_trigger_price.is_none());
+        assert!(params.tp_trigger_price.is_none());
+
+        // Price should be set for limit
+        assert!(params.price.is_some());
+        assert_eq!(params.price.as_ref().unwrap(), "4505.00");
+
+        // Should be Limit type at Bybit level
+        assert_eq!(params.order_type, BybitOrderType::Limit);
+    }
+
+    #[test]
+    fn test_reduce_only_false_omitted() {
+        let params = create_conditional_order_params_with_reduce_only(
+            OrderType::StopMarket,
+            Some(Price::from("4500.00")),
+            None,
+            Some(false),
+        );
+
+        // reduce_only should be None when false (not sent to Bybit)
+        assert!(params.reduce_only.is_none());
+    }
+
+    #[test]
+    fn test_reduce_only_explicit_true() {
+        let params = create_conditional_order_params_with_reduce_only(
+            OrderType::StopMarket,
+            Some(Price::from("4500.00")),
+            None,
+            Some(true),
+        );
+
+        // reduce_only should be Some(true)
+        assert!(params.reduce_only.is_some());
+        assert_eq!(params.reduce_only.unwrap(), true);
+    }
+
+    // Helper function to create conditional order params for testing
+    fn create_conditional_order_params(
+        order_type: OrderType,
+        trigger_price: Option<Price>,
+        price: Option<Price>,
+    ) -> BybitWsPlaceOrderParams {
+        create_conditional_order_params_with_reduce_only(
+            order_type,
+            trigger_price,
+            price,
+            Some(false),
+        )
+    }
+
+    fn create_conditional_order_params_with_reduce_only(
+        order_type: OrderType,
+        trigger_price: Option<Price>,
+        price: Option<Price>,
+        reduce_only: Option<bool>,
+    ) -> BybitWsPlaceOrderParams {
+        use nautilus_bybit::common::enums::BybitTriggerType;
+
+        let is_stop_order = matches!(
+            order_type,
+            OrderType::StopMarket
+                | OrderType::StopLimit
+                | OrderType::MarketIfTouched
+                | OrderType::LimitIfTouched
+        );
+
+        let bybit_order_type = match order_type {
+            OrderType::Market | OrderType::StopMarket | OrderType::MarketIfTouched => {
+                BybitOrderType::Market
+            }
+            OrderType::Limit | OrderType::StopLimit | OrderType::LimitIfTouched => {
+                BybitOrderType::Limit
+            }
+            _ => panic!("Unsupported order type"),
+        };
+
+        if is_stop_order {
+            BybitWsPlaceOrderParams {
+                category: BybitProductType::Linear,
+                symbol: "ETHUSDT".into(),
+                side: BybitOrderSide::Buy,
+                order_type: bybit_order_type,
+                qty: "0.01".to_string(),
+                price: price.map(|p| p.to_string()),
+                time_in_force: Some(BybitTimeInForce::Gtc),
+                order_link_id: Some("test-order-1".to_string()),
+                reduce_only: reduce_only.filter(|&r| r),
+                close_on_trigger: None,
+                trigger_price: trigger_price.map(|p| p.to_string()),
+                trigger_by: Some(BybitTriggerType::LastPrice),
+                trigger_direction: None,
+                tpsl_mode: None,
+                take_profit: None,
+                stop_loss: None,
+                tp_trigger_by: None,
+                sl_trigger_by: None,
+                sl_trigger_price: None,
+                tp_trigger_price: None,
+                sl_order_type: None,
+                tp_order_type: None,
+                sl_limit_price: None,
+                tp_limit_price: None,
+            }
+        } else {
+            BybitWsPlaceOrderParams {
+                category: BybitProductType::Linear,
+                symbol: "ETHUSDT".into(),
+                side: BybitOrderSide::Buy,
+                order_type: bybit_order_type,
+                qty: "0.01".to_string(),
+                price: price.map(|p| p.to_string()),
+                time_in_force: Some(BybitTimeInForce::Gtc),
+                order_link_id: Some("test-order-1".to_string()),
+                reduce_only: reduce_only.filter(|&r| r),
+                close_on_trigger: None,
+                trigger_price: None,
+                trigger_by: None,
+                trigger_direction: None,
+                tpsl_mode: None,
+                take_profit: None,
+                stop_loss: None,
+                tp_trigger_by: None,
+                sl_trigger_by: None,
+                sl_trigger_price: None,
+                tp_trigger_price: None,
+                sl_order_type: None,
+                tp_order_type: None,
+                sl_limit_price: None,
+                tp_limit_price: None,
+            }
+        }
+    }
 }

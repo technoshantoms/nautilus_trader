@@ -18,11 +18,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ustr::Ustr;
 
-use crate::common::enums::{
-    BybitCancelType, BybitCreateType, BybitExecType, BybitOrderSide, BybitOrderStatus,
-    BybitOrderType, BybitProductType, BybitStopOrderType, BybitTimeInForce, BybitTpSlMode,
-    BybitTriggerDirection, BybitTriggerType, BybitWsOrderRequestOp,
+use crate::{
+    common::enums::{
+        BybitCancelType, BybitCreateType, BybitExecType, BybitOrderSide, BybitOrderStatus,
+        BybitOrderType, BybitProductType, BybitStopOrderType, BybitTimeInForce, BybitTpSlMode,
+        BybitTriggerDirection, BybitTriggerType, BybitWsOrderRequestOp,
+    },
+    websocket::enums::BybitWsOperation,
 };
+
+/// Bybit WebSocket subscription message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BybitSubscription {
+    pub op: BybitWsOperation,
+    pub args: Vec<String>,
+}
+
+/// Bybit WebSocket authentication message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BybitAuthRequest {
+    pub op: BybitWsOperation,
+    pub args: Vec<serde_json::Value>,
+}
 
 /// High level message emitted by the Bybit WebSocket client.
 #[derive(Debug, Clone)]
@@ -97,14 +114,32 @@ impl BybitWebSocketError {
     /// Builds an error payload from a generic response frame.
     #[must_use]
     pub fn from_response(response: &BybitWsResponse) -> Self {
+        // Build a more informative error message when ret_msg is missing
+        let message = response.ret_msg.clone().unwrap_or_else(|| {
+            let mut parts = vec![];
+
+            if let Some(op) = &response.op {
+                parts.push(format!("op={}", op));
+            }
+            if let Some(topic) = &response.topic {
+                parts.push(format!("topic={}", topic));
+            }
+            if let Some(success) = response.success {
+                parts.push(format!("success={}", success));
+            }
+
+            if parts.is_empty() {
+                "Bybit websocket error (no error message provided)".to_string()
+            } else {
+                format!("Bybit websocket error: {}", parts.join(", "))
+            }
+        });
+
         Self {
             code: response.ret_code.unwrap_or_default(),
-            message: response
-                .ret_msg
-                .clone()
-                .unwrap_or_else(|| "Bybit websocket error".to_string()),
+            message,
             conn_id: response.conn_id.clone(),
-            topic: response.topic.clone(),
+            topic: response.topic.map(|t| t.to_string()),
             req_id: response.req_id.clone(),
         }
     }
@@ -151,7 +186,7 @@ impl BybitWsHeader {
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsPlaceOrderParams {
     pub category: BybitProductType,
-    pub symbol: String,
+    pub symbol: Ustr,
     pub side: BybitOrderSide,
     pub order_type: BybitOrderType,
     pub qty: String,
@@ -170,6 +205,10 @@ pub struct BybitWsPlaceOrderParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger_by: Option<BybitTriggerType>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_direction: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tpsl_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub take_profit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_loss: Option<String>,
@@ -177,6 +216,18 @@ pub struct BybitWsPlaceOrderParams {
     pub tp_trigger_by: Option<BybitTriggerType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sl_trigger_by: Option<BybitTriggerType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sl_trigger_price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tp_trigger_price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sl_order_type: Option<BybitOrderType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tp_order_type: Option<BybitOrderType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sl_limit_price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tp_limit_price: Option<String>,
 }
 
 /// Parameters for amending an order via WebSocket.
@@ -184,7 +235,7 @@ pub struct BybitWsPlaceOrderParams {
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsAmendOrderParams {
     pub category: BybitProductType,
-    pub symbol: String,
+    pub symbol: Ustr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,7 +261,7 @@ pub struct BybitWsAmendOrderParams {
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsCancelOrderParams {
     pub category: BybitProductType,
-    pub symbol: String,
+    pub symbol: Ustr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,10 +270,9 @@ pub struct BybitWsCancelOrderParams {
 
 /// Subscription acknowledgement returned by Bybit.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct BybitWsSubscriptionMsg {
     pub success: bool,
-    pub op: String,
+    pub op: BybitWsOperation,
     #[serde(default)]
     pub conn_id: Option<String>,
     #[serde(default)]
@@ -233,12 +283,11 @@ pub struct BybitWsSubscriptionMsg {
 
 /// Generic response returned by the endpoint when subscribing or authenticating.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct BybitWsResponse {
     #[serde(default)]
-    pub op: Option<String>,
+    pub op: Option<BybitWsOperation>,
     #[serde(default)]
-    pub topic: Option<String>,
+    pub topic: Option<Ustr>,
     #[serde(default)]
     pub success: Option<bool>,
     #[serde(default)]
@@ -255,7 +304,7 @@ pub struct BybitWsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsAuthResponse {
-    pub op: String,
+    pub op: BybitWsOperation,
     #[serde(default)]
     pub conn_id: Option<String>,
     #[serde(default)]
@@ -272,7 +321,7 @@ pub struct BybitWsAuthResponse {
 pub struct BybitWsKline {
     pub start: i64,
     pub end: i64,
-    pub interval: String,
+    pub interval: Ustr,
     pub open: String,
     pub close: String,
     pub high: String,
@@ -287,10 +336,10 @@ pub struct BybitWsKline {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsKlineMsg {
-    pub topic: String,
+    pub topic: Ustr,
     pub ts: i64,
     #[serde(rename = "type")]
-    pub msg_type: String,
+    pub msg_type: Ustr,
     pub data: Vec<BybitWsKline>,
 }
 
@@ -313,9 +362,9 @@ pub struct BybitWsOrderbookDepth {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsOrderbookDepthMsg {
-    pub topic: String,
+    pub topic: Ustr,
     #[serde(rename = "type")]
-    pub msg_type: String,
+    pub msg_type: Ustr,
     pub ts: i64,
     pub data: BybitWsOrderbookDepth,
     #[serde(default)]
@@ -371,9 +420,9 @@ pub struct BybitWsTickerLinear {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsTickerLinearMsg {
-    pub topic: String,
+    pub topic: Ustr,
     #[serde(rename = "type")]
-    pub msg_type: String,
+    pub msg_type: Ustr,
     pub ts: i64,
     #[serde(default)]
     pub cs: Option<i64>,
@@ -384,7 +433,7 @@ pub struct BybitWsTickerLinearMsg {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsTickerOption {
-    pub symbol: String,
+    pub symbol: Ustr,
     pub bid_price: String,
     pub bid_size: String,
     pub bid_iv: String,
@@ -417,9 +466,9 @@ pub struct BybitWsTickerOption {
 pub struct BybitWsTickerOptionMsg {
     #[serde(default)]
     pub id: Option<String>,
-    pub topic: String,
+    pub topic: Ustr,
     #[serde(rename = "type")]
-    pub msg_type: String,
+    pub msg_type: Ustr,
     pub ts: i64,
     pub data: BybitWsTickerOption,
 }
@@ -465,9 +514,9 @@ pub struct BybitWsTrade {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BybitWsTradeMsg {
-    pub topic: String,
+    pub topic: Ustr,
     #[serde(rename = "type")]
-    pub msg_type: String,
+    pub msg_type: Ustr,
     pub ts: i64,
     pub data: Vec<BybitWsTrade>,
 }
@@ -586,9 +635,12 @@ pub struct BybitWsAccountWalletCoin {
     pub available_to_withdraw: String,
     pub available_to_borrow: String,
     pub accrued_interest: String,
-    pub total_order_im: String,
-    pub total_position_im: String,
-    pub total_position_mm: String,
+    #[serde(default, rename = "totalOrderIM")]
+    pub total_order_im: Option<String>,
+    #[serde(default, rename = "totalPositionIM")]
+    pub total_position_im: Option<String>,
+    #[serde(default, rename = "totalPositionMM")]
+    pub total_position_mm: Option<String>,
     pub equity: String,
 }
 

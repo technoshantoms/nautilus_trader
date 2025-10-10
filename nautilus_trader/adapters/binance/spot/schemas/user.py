@@ -30,7 +30,6 @@ from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.reports import OrderStatusReport
 from nautilus_trader.model.enums import LiquiditySide
 from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.enums import TrailingOffsetType
 from nautilus_trader.model.enums import TriggerType
 from nautilus_trader.model.identifiers import AccountId
@@ -192,7 +191,7 @@ class BinanceSpotOrderUpdateData(msgspec.Struct, kw_only=True):
             order_side=order_side,
             order_type=enum_parser.parse_binance_order_type(self.o),
             time_in_force=enum_parser.parse_binance_time_in_force(self.f),
-            order_status=OrderStatus.ACCEPTED,
+            order_status=enum_parser.parse_binance_order_status(self.X),
             price=price,
             trigger_price=trigger_price,
             trigger_type=TriggerType.LAST_PRICE,
@@ -225,6 +224,7 @@ class BinanceSpotOrderUpdateData(msgspec.Struct, kw_only=True):
         venue_order_id = VenueOrderId(str(self.i))
         instrument_id = exec_client._get_cached_instrument_id(self.s)
         strategy_id = exec_client._cache.strategy_id_for_order(client_order_id)
+
         if strategy_id is None:
             report = self.parse_to_order_status_report(
                 account_id=exec_client.account_id,
@@ -236,7 +236,9 @@ class BinanceSpotOrderUpdateData(msgspec.Struct, kw_only=True):
                 enum_parser=exec_client._enum_parser,
             )
             exec_client._send_order_status_report(report)
-        elif self.x == BinanceExecutionType.NEW:
+            return
+
+        if self.x == BinanceExecutionType.NEW:
             exec_client.generate_order_accepted(
                 strategy_id=strategy_id,
                 instrument_id=instrument_id,
@@ -246,6 +248,10 @@ class BinanceSpotOrderUpdateData(msgspec.Struct, kw_only=True):
             )
         elif self.x == BinanceExecutionType.TRADE:
             instrument = exec_client._instrument_provider.find(instrument_id=instrument_id)
+            if instrument is None:
+                raise ValueError(
+                    f"Cannot process fill for {instrument_id}: instrument not found in cache",
+                )
 
             # Determine commission
             commission_asset = self.N

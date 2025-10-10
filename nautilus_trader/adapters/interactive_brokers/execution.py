@@ -659,18 +659,26 @@ class InteractiveBrokersExecutionClient(LiveExecutionClient):
             self.account_id.get_id(),
         )
 
+        # Handle case when specific instrument requested but no positions found
+        if command.instrument_id and not positions:
+            now = self._clock.timestamp_ns()
+            flat_report = PositionStatusReport(
+                account_id=self.account_id,
+                instrument_id=command.instrument_id,
+                position_side=PositionSide.FLAT,
+                quantity=Quantity.zero(),
+                report_id=UUID4(),
+                ts_last=now,
+                ts_init=now,
+            )
+            self._log.debug(f"Generated FLAT report for {command.instrument_id}")
+            return [flat_report]
+
         if not positions:
             return []
 
         for position in positions:
             self._log.debug(f"Trying PositionStatusReport for {position.contract.conId}")
-
-            if position.quantity > 0:
-                side = PositionSide.LONG
-            elif position.quantity < 0:
-                side = PositionSide.SHORT
-            else:
-                continue  # Skip, IB may continue to display closed positions
 
             instrument = await self.instrument_provider.get_instrument(position.contract)
 
@@ -681,7 +689,16 @@ class InteractiveBrokersExecutionClient(LiveExecutionClient):
                 continue
 
             if not self._cache.instrument(instrument.id):
-                self._handle_data(instrument)
+                self._msgbus.send(endpoint="DataEngine.process", msg=instrument)
+
+            # Determine position side
+            if position.quantity > 0:
+                side = PositionSide.LONG
+            elif position.quantity < 0:
+                side = PositionSide.SHORT
+            else:
+                # Generate FLAT report for zero quantity positions
+                side = PositionSide.FLAT
 
             # Convert avg_cost to Price if available
             avg_px_open = None
@@ -1123,14 +1140,9 @@ class InteractiveBrokersExecutionClient(LiveExecutionClient):
 
             if self._account_summary_tags - set(self._account_summary[currency].keys()) == set():
                 self._log.info(f"{self._account_summary}", LogColor.GREEN)
-                # free = self._account_summary[currency]["FullAvailableFunds"]
                 locked = self._account_summary[currency]["FullMaintMarginReq"]
                 total = self._account_summary[currency]["NetLiquidation"]
-
-                if total - locked < locked:
-                    total = 400000  # TODO: Bug; Cannot recalculate balance when no current balance
-
-                free = total - locked
+                free = self._account_summary[currency].get("FullAvailableFunds", total - locked)
                 account_balance = AccountBalance(
                     total=Money(total, Currency.from_str(currency)),
                     free=Money(free, Currency.from_str(currency)),
@@ -1737,7 +1749,7 @@ class InteractiveBrokersExecutionClient(LiveExecutionClient):
 
             # Ensure instrument is in cache
             if not self._cache.instrument(instrument.id):
-                self._handle_data(instrument)
+                self._msgbus.send(endpoint="DataEngine.process", msg=instrument)
 
             # Determine position side
             side = PositionSide.LONG if new_quantity > 0 else PositionSide.SHORT

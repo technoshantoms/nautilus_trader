@@ -77,7 +77,7 @@ where
     ///
     /// # Errors
     ///
-    /// This function will return an error if the configuration is invalid.
+    /// Returns an error if the configuration is invalid.
     pub const fn new(config: RetryConfig) -> anyhow::Result<Self> {
         Ok(Self {
             config,
@@ -87,9 +87,16 @@ where
 
     /// Executes an operation with retry logic and optional cancellation.
     ///
+    /// Cancellation is checked at three points:
+    /// (1) Before each operation attempt.
+    /// (2) During operation execution (via `tokio::select!`).
+    /// (3) During retry delays.
+    ///
+    /// This means cancellation may be delayed by up to one operation timeout if it occurs mid-execution.
+    ///
     /// # Errors
     ///
-    /// This function will return an error if the operation fails after exhausting all retries,
+    /// Returns an error if the operation fails after exhausting all retries,
     /// if the operation times out, if creating the backoff state fails, or if canceled.
     pub async fn execute_with_retry_inner<F, Fut, T>(
         &self,
@@ -232,8 +239,9 @@ where
                         "Retrying after failure"
                     );
 
-                    // Skip zero-delay sleep to avoid unnecessary yield
+                    // Yield even on zero-delay to avoid busy-wait loop
                     if delay.is_zero() {
+                        tokio::task::yield_now().await;
                         attempt += 1;
                         continue;
                     }
@@ -309,8 +317,9 @@ where
                         "Retrying after timeout"
                     );
 
-                    // Skip zero-delay sleep to avoid unnecessary yield
+                    // Yield even on zero-delay to avoid busy-wait loop
                     if delay.is_zero() {
+                        tokio::task::yield_now().await;
                         attempt += 1;
                         continue;
                     }
@@ -340,7 +349,7 @@ where
     ///
     /// # Errors
     ///
-    /// This function will return an error if the operation fails after exhausting all retries,
+    /// Returns an error if the operation fails after exhausting all retries,
     /// if the operation times out, or if creating the backoff state fails.
     pub async fn execute_with_retry<F, Fut, T>(
         &self,
@@ -361,7 +370,7 @@ where
     ///
     /// # Errors
     ///
-    /// This function will return an error if the operation fails after exhausting all retries,
+    /// Returns an error if the operation fails after exhausting all retries,
     /// if the operation times out, if creating the backoff state fails, or if canceled.
     pub async fn execute_with_retry_with_cancel<F, Fut, T>(
         &self,
@@ -390,7 +399,7 @@ where
 ///
 /// # Errors
 ///
-/// This function will return an error if the default configuration is invalid.
+/// Returns an error if the default configuration is invalid.
 pub fn create_default_retry_manager<E>() -> anyhow::Result<RetryManager<E>>
 where
     E: std::error::Error,
@@ -402,7 +411,7 @@ where
 ///
 /// # Errors
 ///
-/// This function will return an error if the HTTP configuration is invalid.
+/// Returns an error if the HTTP configuration is invalid.
 pub const fn create_http_retry_manager<E>() -> anyhow::Result<RetryManager<E>>
 where
     E: std::error::Error,
@@ -424,7 +433,7 @@ where
 ///
 /// # Errors
 ///
-/// This function will return an error if the WebSocket configuration is invalid.
+/// Returns an error if the WebSocket configuration is invalid.
 pub const fn create_websocket_retry_manager<E>() -> anyhow::Result<RetryManager<E>>
 where
     E: std::error::Error,
