@@ -128,30 +128,51 @@ Only *limit* order types support `post_only`.
 
 ### Position management
 
-| Feature              | Spot | Margin | USDT Futures | Coin Futures | Notes                                        |
-|---------------------|------|--------|--------------|--------------|----------------------------------------------|
-| Query positions     | -    | ✓      | ✓            | ✓            | Real-time position updates.                  |
+| Feature              | Spot | Margin | USDT Futures | Coin Futures | Notes                                      |
+|---------------------|------|--------|--------------|--------------|---------------------------------------------|
+| Query positions     | -    | ✓      | ✓            | ✓            | Real-time position updates.                 |
 | Position mode       | -    | -      | ✓            | ✓            | One-Way vs Hedge mode (position IDs).       |
-| Leverage control    | -    | ✓      | ✓            | ✓            | Dynamic leverage adjustment per symbol.      |
+| Leverage control    | -    | ✓      | ✓            | ✓            | Dynamic leverage adjustment per symbol.     |
 | Margin mode         | -    | ✓      | ✓            | ✓            | Cross vs Isolated margin per symbol.        |
+
+### Risk events
+
+| Feature              | Spot | Margin | USDT Futures | Coin Futures | Notes                                       |
+|----------------------|------|--------|--------------|--------------|---------------------------------------------|
+| Liquidation handling | -    | -      | ✓            | ✓            | Exchange-forced position closures.          |
+| ADL handling         | -    | -      | ✓            | ✓            | Auto-Deleveraging events.                   |
+
+Binance Futures can trigger exchange-generated orders in response to risk events:
+
+- **Liquidations**: When insufficient margin exists to maintain a position, Binance forcibly closes it at the bankruptcy price. These orders have client IDs starting with `autoclose-`.
+- **ADL (Auto-Deleveraging)**: When the insurance fund is depleted, Binance closes profitable positions to cover losses. These orders use client ID `adl_autoclose`.
+- **Settlements**: Quarterly contract deliveries use client IDs starting with `settlement_autoclose-`.
+
+The adapter detects these special order types via their client ID patterns and execution type (`CALCULATED`), then:
+
+1. Logs a warning with order details for monitoring.
+2. Generates an `OrderStatusReport` to seed the cache.
+3. Generates a `FillReport` with correct fill details and TAKER liquidity side.
+
+This ensures liquidation and ADL events are properly reflected in portfolio state and PnL calculations.
 
 ### Order querying
 
-| Feature              | Spot | Margin | USDT Futures | Coin Futures | Notes                                        |
-|---------------------|------|--------|--------------|--------------|----------------------------------------------|
-| Query open orders   | ✓    | ✓      | ✓            | ✓            | List all active orders.                      |
-| Query order history | ✓    | ✓      | ✓            | ✓            | Historical order data.                       |
+| Feature              | Spot | Margin | USDT Futures | Coin Futures | Notes                                      |
+|---------------------|------|--------|--------------|--------------|---------------------------------------------|
+| Query open orders   | ✓    | ✓      | ✓            | ✓            | List all active orders.                     |
+| Query order history | ✓    | ✓      | ✓            | ✓            | Historical order data.                      |
 | Order status updates| ✓    | ✓      | ✓            | ✓            | Real-time order state changes.              |
 | Trade history       | ✓    | ✓      | ✓            | ✓            | Execution and fill reports.                 |
 
 ### Contingent orders
 
-| Feature              | Spot | Margin | USDT Futures | Coin Futures | Notes                                        |
+| Feature              | Spot | Margin | USDT Futures | Coin Futures | Notes                                       |
 |---------------------|------|--------|--------------|--------------|----------------------------------------------|
 | Order lists         | -    | -      | -            | -            | *Not supported*.                             |
 | OCO orders          | ✓    | ✓      | ✓            | ✓            | One-Cancels-Other for stop loss/take profit. |
-| Bracket orders      | ✓    | ✓      | ✓            | ✓            | Stop loss + take profit combinations.       |
-| Conditional orders  | ✓    | ✓      | ✓            | ✓            | Stop and market-if-touched orders.          |
+| Bracket orders      | ✓    | ✓      | ✓            | ✓            | Stop loss + take profit combinations.        |
+| Conditional orders  | ✓    | ✓      | ✓            | ✓            | Stop and market-if-touched orders.           |
 
 ### Order parameters
 
@@ -200,26 +221,15 @@ strategy.submit_order(
 
 ### Trailing stops
 
-Binance uses the concept of an activation price for trailing stops, as detailed in their [documentation](https://www.binance.com/en/support/faq/what-is-a-trailing-stop-order-360042299292).
-This approach is somewhat unconventional. For trailing stop orders to function on Binance, the activation price should be set using the `activation_price` parameter.
+For trailing stop market orders on Binance:
 
-Note that the activation price is **not** the same as the trigger/STOP price. Binance will always calculate the trigger price for the order based on the current market price and the callback rate provided by `trailing_offset`.
-The activation price is the price at which the order will begin trailing based on the callback rate.
+- Use `activation_price` (optional) to specify when the trailing mechanism activates
+- When omitted, Binance uses the current market price at submission time
+- Use `trailing_offset` for the callback rate (in basis points)
 
 :::warning
-For Binance trailing stop orders, you must use `activation_price` instead of `trigger_price`. Using `trigger_price` will result in an order rejection.
+Do not use `trigger_price` for trailing stop orders - it will fail with an error. Use `activation_price` instead.
 :::
-
-When submitting trailing stop orders from your strategy, you have two options:
-
-1. Use the `activation_price` to manually set the activation price.
-2. Leave the `activation_price` as `None`, activating the trailing mechanism immediately.
-
-You must also have at least *one* of the following:
-
-- The `activation_price` for the order is set.
-- (or) you have subscribed to quotes for the instrument you're submitting the order for (used to infer activation price).
-- (or) you have subscribed to trades for the instrument you're submitting the order for (used to infer activation price).
 
 ## Order books
 

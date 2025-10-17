@@ -15,8 +15,6 @@
 
 # ruff: noqa (under development)
 
-import pandas as pd
-
 from dataclasses import dataclass
 
 from nautilus_trader.common import DataActor  # type: ignore[attr-defined]
@@ -85,8 +83,10 @@ class BlockchainActor(DataActor):
             self.subscribe_pool_fee_collects(instrument_id, self.client_id)
             self.subscribe_pool_flash_events(instrument_id, self.client_id)
 
-        self.clock.set_timer("TEST-TIMER-SECONDS-1", pd.Timedelta(seconds=1))
-        self.clock.set_timer("TEST-TIMER-SECONDS-2", pd.Timedelta(seconds=2))
+        # TODO: Uncomment to demonstrate timers
+        # import pandas as pd
+        # self.clock.set_timer("TEST-TIMER-SECONDS-1", pd.Timedelta(seconds=1))
+        # self.clock.set_timer("TEST-TIMER-SECONDS-2", pd.Timedelta(seconds=2))
 
     def on_stop(self) -> None:
         """
@@ -107,6 +107,9 @@ class BlockchainActor(DataActor):
         """
         self.log.info(repr(event), LogColor.BLUE)
 
+    def on_pool(self, pool) -> None:
+        self.log.info(f"Received pool: {pool.instrument_id}", LogColor.GREEN)
+
     def on_block(self, block: Block) -> None:
         """
         Actions to be performed on receiving a block.
@@ -115,7 +118,15 @@ class BlockchainActor(DataActor):
 
         for pool_id in self.pools:
             pool = self.cache.pool_profiler(pool_id)
-            self.log.info(repr(pool), LogColor.MAGENTA)
+            if pool is None:
+                continue
+            total_ticks = pool.get_active_tick_count()
+            total_positions = pool.get_total_active_positions()
+            liquidity = pool.get_active_liquidity()
+            self.log.info(
+                f"Pool {pool_id} contains {total_ticks} active ticks and {total_positions} active positions with liquidity of {liquidity}",
+                LogColor.MAGENTA,
+            )
 
     def on_pool_swap(self, swap: PoolSwap) -> None:
         """

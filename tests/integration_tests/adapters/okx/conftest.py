@@ -129,6 +129,7 @@ def mock_http_client():
     mock.add_instrument = MagicMock()
     mock.cancel_all_requests = MagicMock()
     mock.is_initialized = MagicMock(return_value=True)
+    mock.http_get_server_time = AsyncMock(return_value=1234567890000)
 
     mock_account_state = MagicMock()
     mock_account_state.to_dict = MagicMock(
@@ -168,6 +169,7 @@ def _create_ws_mock() -> MagicMock:
     mock.subscribe_book50_l2_tbt = AsyncMock()
     mock.subscribe_book_l2_tbt = AsyncMock()
     mock.subscribe_book_depth5 = AsyncMock()
+    mock.subscribe_book_with_depth = AsyncMock()
     mock.subscribe_quotes = AsyncMock()
     mock.subscribe_trades = AsyncMock()
     mock.subscribe_mark_prices = AsyncMock()

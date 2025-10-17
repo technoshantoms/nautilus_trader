@@ -148,6 +148,7 @@ impl PoolSwap {
     fn py_new(
         chain: Chain,
         dex: Dex,
+        instrument_id: InstrumentId,
         pool_address: String,
         block: u64,
         transaction_hash: String,
@@ -173,6 +174,7 @@ impl PoolSwap {
         Ok(Self::new(
             Arc::new(chain),
             Arc::new(dex),
+            instrument_id,
             Address::from_str(&pool_address).map_err(to_pyvalue_err)?,
             block,
             transaction_hash,
@@ -231,7 +233,7 @@ impl PoolSwap {
     #[getter]
     #[pyo3(name = "instrument_id")]
     fn py_instrument_id(&self) -> InstrumentId {
-        self.instrument_id()
+        self.instrument_id
     }
 
     #[getter]
@@ -309,6 +311,7 @@ impl PoolLiquidityUpdate {
         chain: Chain,
         dex: Dex,
         pool_address: String,
+        instrument_id: InstrumentId,
         kind: PoolLiquidityUpdateType,
         block: u64,
         transaction_hash: String,
@@ -334,6 +337,7 @@ impl PoolLiquidityUpdate {
         Ok(Self::new(
             Arc::new(chain),
             Arc::new(dex),
+            instrument_id,
             Address::from_str(&pool_address).map_err(to_pyvalue_err)?,
             kind,
             block,
@@ -389,8 +393,8 @@ impl PoolLiquidityUpdate {
 
     #[getter]
     #[pyo3(name = "instrument_id")]
-    fn py_instrument_id(&self) -> crate::identifiers::InstrumentId {
-        self.instrument_id()
+    fn py_instrument_id(&self) -> InstrumentId {
+        self.instrument_id
     }
 
     #[getter]
@@ -492,6 +496,7 @@ impl PoolFeeCollect {
         chain: Chain,
         dex: Dex,
         pool_address: String,
+        instrument_id: InstrumentId,
         block: u64,
         transaction_hash: String,
         transaction_index: u32,
@@ -509,6 +514,7 @@ impl PoolFeeCollect {
         Ok(Self::new(
             Arc::new(chain),
             Arc::new(dex),
+            instrument_id,
             Address::from_str(&pool_address).map_err(to_pyvalue_err)?,
             block,
             transaction_hash,
@@ -562,7 +568,7 @@ impl PoolFeeCollect {
     #[getter]
     #[pyo3(name = "instrument_id")]
     fn py_instrument_id(&self) -> InstrumentId {
-        self.instrument_id()
+        self.instrument_id
     }
 
     #[getter]
@@ -646,6 +652,7 @@ impl PoolFlash {
         chain: Chain,
         dex: Dex,
         pool_address: String,
+        instrument_id: InstrumentId,
         block: u64,
         transaction_hash: String,
         transaction_index: u32,
@@ -667,6 +674,7 @@ impl PoolFlash {
         Ok(Self::new(
             Arc::new(chain),
             Arc::new(dex),
+            instrument_id,
             Address::from_str(&pool_address).map_err(to_pyvalue_err)?,
             block,
             transaction_hash,
@@ -721,7 +729,7 @@ impl PoolFlash {
     #[getter]
     #[pyo3(name = "instrument_id")]
     fn py_instrument_id(&self) -> InstrumentId {
-        self.instrument_id()
+        self.instrument_id
     }
 
     #[getter]

@@ -13,6 +13,9 @@ documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 name = "nautilus_network"
 crate-type = ["rlib", "staticlib", "cdylib"]
@@ -25,6 +28,7 @@ extension-module = [
   "pyo3/extension-module",
 ]
 python = ["nautilus-core/python", "pyo3", "pyo3-async-runtimes"]
+turmoil = ["dep:turmoil"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -58,6 +62,7 @@ webpki-roots = { workspace = true }
 
 pyo3 = { workspace = true, optional = true }
 pyo3-async-runtimes = { workspace = true, optional = true }
+turmoil = { workspace = true, optional = true }
 
 [dev-dependencies]
 nautilus-common = { workspace = true }

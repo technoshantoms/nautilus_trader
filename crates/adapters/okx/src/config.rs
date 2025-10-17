@@ -16,7 +16,7 @@
 //! Configuration structures for the OKX adapter.
 
 use crate::common::{
-    enums::{OKXContractType, OKXInstrumentType, OKXVipLevel},
+    enums::{OKXContractType, OKXInstrumentType},
     urls::{
         get_http_base_url, get_ws_base_url_business, get_ws_base_url_private,
         get_ws_base_url_public,
@@ -36,6 +36,9 @@ pub struct OKXDataClientConfig {
     pub instrument_types: Vec<OKXInstrumentType>,
     /// Contract type filter applied to loaded instruments.
     pub contract_types: Option<Vec<OKXContractType>>,
+    /// Instrument families to load (e.g., "BTC-USD", "ETH-USD").
+    /// Required for OPTIONS. Optional for FUTURES/SWAP. Not applicable for SPOT/MARGIN.
+    pub instrument_families: Option<Vec<String>>,
     /// Optional override for the HTTP base URL.
     pub base_url_http: Option<String>,
     /// Optional override for the public WebSocket URL.
@@ -48,8 +51,6 @@ pub struct OKXDataClientConfig {
     pub http_timeout_secs: Option<u64>,
     /// Optional interval for refreshing instruments.
     pub update_instruments_interval_mins: Option<u64>,
-    /// Optional VIP level that unlocks additional subscriptions.
-    pub vip_level: Option<OKXVipLevel>,
 }
 
 impl Default for OKXDataClientConfig {
@@ -60,13 +61,13 @@ impl Default for OKXDataClientConfig {
             api_passphrase: None,
             instrument_types: vec![OKXInstrumentType::Spot],
             contract_types: None,
+            instrument_families: None,
             base_url_http: None,
             base_url_ws_public: None,
             base_url_ws_business: None,
             is_demo: false,
             http_timeout_secs: Some(60),
             update_instruments_interval_mins: Some(60),
-            vip_level: None,
         }
     }
 }
@@ -126,6 +127,9 @@ pub struct OKXExecClientConfig {
     pub instrument_types: Vec<OKXInstrumentType>,
     /// Contract type filter applied to operations.
     pub contract_types: Option<Vec<OKXContractType>>,
+    /// Instrument families to load (e.g., "BTC-USD", "ETH-USD").
+    /// Required for OPTIONS. Optional for FUTURES/SWAP. Not applicable for SPOT/MARGIN.
+    pub instrument_families: Option<Vec<String>>,
     /// Optional override for the HTTP base URL.
     pub base_url_http: Option<String>,
     /// Optional override for the private WebSocket URL.
@@ -156,6 +160,7 @@ impl Default for OKXExecClientConfig {
             api_passphrase: None,
             instrument_types: vec![OKXInstrumentType::Spot],
             contract_types: None,
+            instrument_families: None,
             base_url_http: None,
             base_url_ws_private: None,
             base_url_ws_business: None,

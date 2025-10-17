@@ -49,7 +49,7 @@ use {
 
 use super::{Actor, DataActor, DataActorCore, data_actor::DataActorConfig};
 #[cfg(feature = "defi")]
-use crate::msgbus::switchboard::{get_defi_blocks_topic, get_defi_pool_swaps_topic};
+use crate::defi::switchboard::{get_defi_blocks_topic, get_defi_pool_swaps_topic};
 use crate::{
     actor::registry::{get_actor, get_actor_unchecked, register_actor},
     cache::Cache,
@@ -304,7 +304,7 @@ struct DummyActor {
 }
 impl DummyActor {
     fn new<S: AsRef<str>>(s: S) -> Self {
-        DummyActor {
+        Self {
             id_str: Ustr::from_str(s.as_ref()).unwrap(),
             count: 0,
         }
@@ -1536,7 +1536,7 @@ fn test_subscribe_and_receive_pools(
 
     use nautilus_model::defi::{Dex, DexType, Pool, Token, chain::chains, dex::AmmType};
 
-    use crate::msgbus::switchboard::get_defi_pool_topic;
+    use crate::defi::switchboard::get_defi_pool_topic;
 
     let chain = Arc::new(chains::ETHEREUM.clone());
     let dex = Dex::new(
@@ -1566,7 +1566,7 @@ fn test_subscribe_and_receive_pools(
         18,
     );
     let pool = Pool::new(
-        chain.clone(),
+        chain,
         Arc::new(dex),
         Address::from([0x12; 20]),
         1000000,
@@ -1624,8 +1624,9 @@ fn test_subscribe_and_receive_pool_swaps(
         InstrumentId::from("0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443.Arbitrum:UniswapV3");
 
     let swap = PoolSwap::new(
-        chain.clone(),
+        chain,
         Arc::new(dex),
+        instrument_id,
         pool_address,
         1000u64,
         "0x123".to_string(),
@@ -1691,6 +1692,7 @@ fn test_unsubscribe_pool_swaps(
     let swap1 = PoolSwap::new(
         chain.clone(),
         Arc::new(dex.clone()),
+        instrument_id,
         pool_address,
         1000u64,
         "0x123".to_string(),
@@ -1714,8 +1716,9 @@ fn test_unsubscribe_pool_swaps(
     actor.unsubscribe_pool_swaps(instrument_id, None, None);
 
     let swap2 = PoolSwap::new(
-        chain.clone(),
+        chain,
         Arc::new(dex),
+        instrument_id,
         pool_address,
         2000u64,
         "0x456".to_string(),

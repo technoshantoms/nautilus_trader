@@ -288,7 +288,7 @@ impl BitmexDataClient {
         let http_client = self.http_client.clone();
 
         let handle = tokio::spawn(async move {
-            let mut http_client = http_client;
+            let http_client = http_client;
             loop {
                 let sleep = tokio::time::sleep(interval);
                 tokio::pin!(sleep);
@@ -464,7 +464,7 @@ impl DataClient for BitmexDataClient {
         }
 
         let instrument_id = cmd.instrument_id;
-        let depth = cmd.depth.map(|d| d.get()).unwrap_or(0);
+        let depth = cmd.depth.map_or(0, |d| d.get());
         let channel = if depth > 0 && depth <= 25 {
             BitmexBookChannel::OrderBookL2_25
         } else {
@@ -523,7 +523,7 @@ impl DataClient for BitmexDataClient {
             anyhow::bail!("BitMEX only supports L2_MBP order book snapshots");
         }
 
-        let depth = cmd.depth.map(|d| d.get()).unwrap_or(10);
+        let depth = cmd.depth.map_or(10, |d| d.get());
         if depth != 10 {
             tracing::warn!("BitMEX orderBook10 provides 10 levels; requested depth={depth}");
         }
@@ -805,7 +805,7 @@ impl DataClient for BitmexDataClient {
         let active_only = self.config.active_only;
 
         tokio::spawn(async move {
-            let mut http_client = http;
+            let http_client = http;
             match http_client
                 .request_instruments(active_only)
                 .await
@@ -868,7 +868,7 @@ impl DataClient for BitmexDataClient {
             return Ok(());
         }
 
-        let mut http_client = self.http_client.clone();
+        let http_client = self.http_client.clone();
         let instruments_cache = Arc::clone(&self.instruments);
         let sender = self.data_sender.clone();
         let instrument_id = request.instrument_id;

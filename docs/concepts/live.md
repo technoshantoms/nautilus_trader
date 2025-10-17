@@ -273,6 +273,8 @@ The following additional options provide further control over execution behavior
 By configuring these memory management settings appropriately, you can prevent memory usage from growing
 indefinitely during long-running / HFT sessions while ensuring that recently closed orders, closed positions, and account events
 remain available in memory for any ongoing operations that might require them.
+Set an interval to enable the relevant purge loop; leaving it unset disables both scheduling and deletion.
+Each loop delegates to the cache APIs described in [Purging cached state](cache.md#purging-cached-state).
 
 #### Queue management
 
@@ -354,7 +356,7 @@ finally:
 ## Execution reconciliation
 
 Execution reconciliation is the process of aligning the external state of reality for orders and positions
-(both closed and open) with the systems internal state built from events.
+(both closed and open) with the system's internal state built from events.
 This process is primarily applicable to live trading, which is why only the `LiveExecutionEngine` has reconciliation capability.
 
 There are two main scenarios for reconciliation:

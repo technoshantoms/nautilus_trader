@@ -41,10 +41,7 @@ use std::{
 use bytes::Bytes;
 use nautilus_core::CleanDrop;
 use nautilus_cryptography::providers::install_cryptographic_provider;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio_tungstenite::{
     MaybeTlsStream,
     tungstenite::{Error, client::IntoClientRequest, stream::Mode},
@@ -56,6 +53,7 @@ use crate::{
     fix::process_fix_buffer,
     logging::{log_task_aborted, log_task_started, log_task_stopped},
     mode::ConnectionMode,
+    net::TcpStream,
     tls::{Connector, create_tls_config_from_certs_dir, tcp_tls},
 };
 
@@ -289,8 +287,8 @@ impl SocketClientInner {
             let port = parsed
                 .port_u16()
                 .unwrap_or_else(|| match parsed.scheme_str() {
-                    Some("wss") | Some("https") => 443,
-                    Some("ws") | Some("http") => 80,
+                    Some("wss" | "https") => 443,
+                    Some("ws" | "http") => 80,
                     _ => match mode {
                         Mode::Tls => 443,
                         Mode::Plain => 80,
@@ -791,27 +789,26 @@ impl SocketClient {
         self.connection_mode
             .store(ConnectionMode::Disconnect.as_u8(), Ordering::SeqCst);
 
-        match tokio::time::timeout(Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS), async {
-            while !self.is_closed() {
-                tokio::time::sleep(Duration::from_millis(CONNECTION_STATE_CHECK_INTERVAL_MS)).await;
-            }
+        if let Ok(()) =
+            tokio::time::timeout(Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS), async {
+                while !self.is_closed() {
+                    tokio::time::sleep(Duration::from_millis(CONNECTION_STATE_CHECK_INTERVAL_MS))
+                        .await;
+                }
 
-            if !self.controller_task.is_finished() {
-                self.controller_task.abort();
-                log_task_aborted("controller");
-            }
-        })
-        .await
-        {
-            Ok(()) => {
-                log_task_stopped("controller");
-            }
-            Err(_) => {
-                tracing::error!("Timeout waiting for controller task to finish");
                 if !self.controller_task.is_finished() {
                     self.controller_task.abort();
                     log_task_aborted("controller");
                 }
+            })
+            .await
+        {
+            log_task_stopped("controller");
+        } else {
+            tracing::error!("Timeout waiting for controller task to finish");
+            if !self.controller_task.is_finished() {
+                self.controller_task.abort();
+                log_task_aborted("controller");
             }
         }
     }
@@ -1265,6 +1262,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "turmoil"))]
 mod rust_tests {
     use rstest::rstest;
     use tokio::{

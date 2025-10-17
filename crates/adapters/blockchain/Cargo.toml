@@ -14,6 +14,9 @@ documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 name = "nautilus_blockchain"
 crate-type = ["rlib", "cdylib"]
@@ -71,6 +74,7 @@ strum = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 ustr = { workspace = true }
 

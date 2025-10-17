@@ -96,6 +96,18 @@ pub fn parse_instrument_any(
                 e
             })
             .ok(),
+        BitmexInstrumentType::PredictionMarket => {
+            // Prediction markets work similarly to futures (bounded 0-100, cash settled)
+            parse_futures_instrument(instrument, ts_init)
+                .map_err(|e| {
+                    tracing::warn!(
+                        "Failed to parse prediction market instrument {}: {e}",
+                        instrument.symbol,
+                    );
+                    e
+                })
+                .ok()
+        }
         BitmexInstrumentType::BasketIndex
         | BitmexInstrumentType::CryptoIndex
         | BitmexInstrumentType::FxIndex
@@ -384,8 +396,7 @@ pub fn parse_futures_instrument(
     let activation_ns = definition
         .listing
         .as_ref()
-        .map(|dt| UnixNanos::from(*dt))
-        .unwrap_or(ts_event);
+        .map_or(ts_event, |dt| UnixNanos::from(*dt));
     let expiration_ns = parse_optional_datetime_to_unix_nanos(&definition.expiry, "expiry");
     let price_increment = Price::from(definition.tick_size.to_string());
 
@@ -580,7 +591,7 @@ pub fn parse_order_status_report(
 
     // BitMEX may not include ord_type in cancel responses,
     // for robustness default to LIMIT if not provided.
-    let order_type: OrderType = order.ord_type.map(|t| t.into()).unwrap_or(OrderType::Limit);
+    let order_type: OrderType = order.ord_type.map_or(OrderType::Limit, |t| t.into());
 
     // BitMEX may not include time_in_force in cancel responses,
     // for robustness default to GTC if not provided.
@@ -590,13 +601,13 @@ pub fn parse_order_status_report(
         .unwrap_or(TimeInForce::Gtc);
 
     // BitMEX may omit ord_status in responses for completed orders
-    // Defensively infer from leaves_qty and cum_qty when possible
+    // Defensively infer from leaves_qty, cum_qty, and working_indicator when possible
     let order_status: OrderStatus = if let Some(status) = order.ord_status.as_ref() {
         (*status).into()
     } else {
-        // Infer status from quantity fields
-        match (order.leaves_qty, order.cum_qty) {
-            (Some(0), Some(cum)) if cum > 0 => {
+        // Infer status from quantity fields and working indicator
+        match (order.leaves_qty, order.cum_qty, order.working_indicator) {
+            (Some(0), Some(cum), _) if cum > 0 => {
                 tracing::debug!(
                     order_id = ?order.order_id,
                     client_order_id = ?order.cl_ord_id,
@@ -605,7 +616,7 @@ pub fn parse_order_status_report(
                 );
                 OrderStatus::Filled
             }
-            (Some(0), _) => {
+            (Some(0), _, _) => {
                 tracing::debug!(
                     order_id = ?order.order_id,
                     client_order_id = ?order.cl_ord_id,
@@ -614,14 +625,24 @@ pub fn parse_order_status_report(
                 );
                 OrderStatus::Canceled
             }
+            // BitMEX cancel responses may omit all quantity fields but include working_indicator
+            (None, None, Some(false)) => {
+                tracing::debug!(
+                    order_id = ?order.order_id,
+                    client_order_id = ?order.cl_ord_id,
+                    "Inferred Canceled from missing ordStatus with working_indicator=false"
+                );
+                OrderStatus::Canceled
+            }
             _ => {
                 let order_json = serde_json::to_string(order)?;
                 anyhow::bail!(
-                    "Order missing ord_status and cannot infer (order_id={}, client_order_id={:?}, leaves_qty={:?}, cum_qty={:?}, order_json={})",
+                    "Order missing ord_status and cannot infer (order_id={}, client_order_id={:?}, leaves_qty={:?}, cum_qty={:?}, working_indicator={:?}, order_json={})",
                     order.order_id,
                     order.cl_ord_id,
                     order.leaves_qty,
                     order.cum_qty,
+                    order.working_indicator,
                     order_json
                 );
             }
@@ -772,7 +793,7 @@ pub fn parse_order_status_report(
     } else if order_status == OrderStatus::Canceled
         && let Some(reason) = order.ord_rej_reason.or(order.text)
     {
-        tracing::debug!(
+        tracing::trace!(
             order_id = ?order.order_id,
             client_order_id = ?order.cl_ord_id,
             reason = ?reason,
@@ -1146,7 +1167,7 @@ mod tests {
             foreign_notional: None,
         };
 
-        let bar = parse_trade_bin(bin.clone(), &instrument_any, &bar_type, ts_init).unwrap();
+        let bar = parse_trade_bin(bin, &instrument_any, &bar_type, ts_init).unwrap();
 
         let precision = instrument_any.price_precision();
         let expected_high = Price::from_decimal(Decimal::from_str("50010.0").unwrap(), precision)

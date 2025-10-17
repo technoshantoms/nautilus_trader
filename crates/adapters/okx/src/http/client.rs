@@ -42,7 +42,7 @@ use std::{
 use ahash::{AHashMap, AHashSet};
 use chrono::{DateTime, Utc};
 use nautilus_core::{
-    UnixNanos, consts::NAUTILUS_USER_AGENT, env::get_env_var, time::get_atomic_clock_realtime,
+    UnixNanos, consts::NAUTILUS_USER_AGENT, env::get_or_env_var, time::get_atomic_clock_realtime,
 };
 use nautilus_model::{
     data::{Bar, BarType, IndexPriceUpdate, MarkPriceUpdate, TradeTick},
@@ -66,8 +66,8 @@ use ustr::Ustr;
 use super::{
     error::OKXHttpError,
     models::{
-        OKXAccount, OKXCancelAlgoOrderRequest, OKXCancelAlgoOrderResponse, OKXIndexTicker,
-        OKXMarkPrice, OKXOrderAlgo, OKXOrderHistory, OKXPlaceAlgoOrderRequest,
+        OKXAccount, OKXCancelAlgoOrderRequest, OKXCancelAlgoOrderResponse, OKXFeeRate,
+        OKXIndexTicker, OKXMarkPrice, OKXOrderAlgo, OKXOrderHistory, OKXPlaceAlgoOrderRequest,
         OKXPlaceAlgoOrderResponse, OKXPosition, OKXPositionHistory, OKXPositionTier, OKXServerTime,
         OKXTransactionDetail,
     },
@@ -77,9 +77,9 @@ use super::{
         GetInstrumentsParams, GetInstrumentsParamsBuilder, GetMarkPriceParams,
         GetMarkPriceParamsBuilder, GetOrderHistoryParams, GetOrderHistoryParamsBuilder,
         GetOrderListParams, GetOrderListParamsBuilder, GetPositionTiersParams,
-        GetPositionsHistoryParams, GetPositionsParams, GetPositionsParamsBuilder, GetTradesParams,
-        GetTradesParamsBuilder, GetTransactionDetailsParams, GetTransactionDetailsParamsBuilder,
-        SetPositionModeParams, SetPositionModeParamsBuilder,
+        GetPositionsHistoryParams, GetPositionsParams, GetPositionsParamsBuilder,
+        GetTradeFeeParams, GetTradesParams, GetTradesParamsBuilder, GetTransactionDetailsParams,
+        GetTransactionDetailsParamsBuilder, SetPositionModeParams, SetPositionModeParamsBuilder,
     },
 };
 use crate::{
@@ -88,7 +88,7 @@ use crate::{
         credential::Credential,
         enums::{
             OKXAlgoOrderType, OKXInstrumentType, OKXOrderStatus, OKXPositionMode, OKXSide,
-            OKXTradeMode, OKXTriggerType,
+            OKXTradeMode, OKXTriggerType, OKXVipLevel,
         },
         models::OKXInstrument,
         parse::{
@@ -141,11 +141,12 @@ pub struct OKXHttpInnerClient {
     credential: Option<Credential>,
     retry_manager: RetryManager<OKXHttpError>,
     cancellation_token: CancellationToken,
+    is_demo: bool,
 }
 
 impl Default for OKXHttpInnerClient {
     fn default() -> Self {
-        Self::new(None, Some(60), None, None, None)
+        Self::new(None, Some(60), None, None, None, false)
             .expect("Failed to create default OKXHttpInnerClient")
     }
 }
@@ -243,6 +244,7 @@ impl OKXHttpInnerClient {
         max_retries: Option<u32>,
         retry_delay_ms: Option<u64>,
         retry_delay_max_ms: Option<u64>,
+        is_demo: bool,
     ) -> Result<Self, OKXHttpError> {
         let retry_config = RetryConfig {
             max_retries: max_retries.unwrap_or(3),
@@ -262,7 +264,7 @@ impl OKXHttpInnerClient {
         Ok(Self {
             base_url: base_url.unwrap_or(OKX_HTTP_URL.to_string()),
             client: HttpClient::new(
-                Self::default_headers(),
+                Self::default_headers(is_demo),
                 vec![],
                 Self::rate_limiter_quotas(),
                 Some(*OKX_REST_QUOTA),
@@ -271,6 +273,7 @@ impl OKXHttpInnerClient {
             credential: None,
             retry_manager,
             cancellation_token: CancellationToken::new(),
+            is_demo,
         })
     }
 
@@ -290,6 +293,7 @@ impl OKXHttpInnerClient {
         max_retries: Option<u32>,
         retry_delay_ms: Option<u64>,
         retry_delay_max_ms: Option<u64>,
+        is_demo: bool,
     ) -> Result<Self, OKXHttpError> {
         let retry_config = RetryConfig {
             max_retries: max_retries.unwrap_or(3),
@@ -309,7 +313,7 @@ impl OKXHttpInnerClient {
         Ok(Self {
             base_url,
             client: HttpClient::new(
-                Self::default_headers(),
+                Self::default_headers(is_demo),
                 vec![],
                 Self::rate_limiter_quotas(),
                 Some(*OKX_REST_QUOTA),
@@ -318,12 +322,20 @@ impl OKXHttpInnerClient {
             credential: Some(Credential::new(api_key, api_secret, api_passphrase)),
             retry_manager,
             cancellation_token: CancellationToken::new(),
+            is_demo,
         })
     }
 
     /// Builds the default headers to include with each request (e.g., `User-Agent`).
-    fn default_headers() -> HashMap<String, String> {
-        HashMap::from([(USER_AGENT.to_string(), NAUTILUS_USER_AGENT.to_string())])
+    fn default_headers(is_demo: bool) -> HashMap<String, String> {
+        let mut headers =
+            HashMap::from([(USER_AGENT.to_string(), NAUTILUS_USER_AGENT.to_string())]);
+
+        if is_demo {
+            headers.insert("x-simulated-trading".to_string(), "1".to_string());
+        }
+
+        headers
     }
 
     /// Combine a base path with a `serde_urlencoded` query string if one exists.
@@ -359,7 +371,7 @@ impl OKXHttpInnerClient {
         };
 
         let api_key = credential.api_key.to_string();
-        let api_passphrase = credential.api_passphrase.to_string();
+        let api_passphrase = credential.api_passphrase.clone();
 
         // OKX requires milliseconds in the timestamp (ISO 8601 with milliseconds)
         let now = Utc::now();
@@ -368,9 +380,9 @@ impl OKXHttpInnerClient {
         let signature = credential.sign_bytes(&timestamp, method.as_str(), path, body);
 
         let mut headers = HashMap::new();
-        headers.insert("OK-ACCESS-KEY".to_string(), api_key.clone());
+        headers.insert("OK-ACCESS-KEY".to_string(), api_key);
         headers.insert("OK-ACCESS-PASSPHRASE".to_string(), api_passphrase);
-        headers.insert("OK-ACCESS-TIMESTAMP".to_string(), timestamp.clone());
+        headers.insert("OK-ACCESS-TIMESTAMP".to_string(), timestamp);
         headers.insert("OK-ACCESS-SIGN".to_string(), signature);
 
         Ok(headers)
@@ -732,6 +744,25 @@ impl OKXHttpInnerClient {
         self.send_request(Method::GET, path, None, true).await
     }
 
+    /// Requests fee rates for the account.
+    ///
+    /// Returns fee rates for the specified instrument type and the user's VIP level.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-fee-rates>
+    pub async fn http_get_trade_fee(
+        &self,
+        params: GetTradeFeeParams,
+    ) -> Result<Vec<OKXFeeRate>, OKXHttpError> {
+        let path = Self::build_path("/api/v5/account/trade-fee", &params)?;
+        self.send_request(Method::GET, &path, None, true).await
+    }
+
     /// Requests historical order records.
     ///
     /// # Errors
@@ -863,7 +894,8 @@ pub struct OKXHttpClient {
 
 impl Default for OKXHttpClient {
     fn default() -> Self {
-        Self::new(None, Some(60), None, None, None).expect("Failed to create default OKXHttpClient")
+        Self::new(None, Some(60), None, None, None, false)
+            .expect("Failed to create default OKXHttpClient")
     }
 }
 
@@ -883,6 +915,7 @@ impl OKXHttpClient {
         max_retries: Option<u32>,
         retry_delay_ms: Option<u64>,
         retry_delay_max_ms: Option<u64>,
+        is_demo: bool,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             inner: Arc::new(OKXHttpInnerClient::new(
@@ -891,6 +924,7 @@ impl OKXHttpClient {
                 max_retries,
                 retry_delay_ms,
                 retry_delay_max_ms,
+                is_demo,
             )?),
             instruments_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_initialized: false,
@@ -904,7 +938,7 @@ impl OKXHttpClient {
     ///
     /// Returns an error if the operation fails.
     pub fn from_env() -> anyhow::Result<Self> {
-        Self::with_credentials(None, None, None, None, None, None, None, None)
+        Self::with_credentials(None, None, None, None, None, None, None, None, false)
     }
 
     /// Creates a new [`OKXHttpClient`] configured with credentials
@@ -923,10 +957,11 @@ impl OKXHttpClient {
         max_retries: Option<u32>,
         retry_delay_ms: Option<u64>,
         retry_delay_max_ms: Option<u64>,
+        is_demo: bool,
     ) -> anyhow::Result<Self> {
-        let api_key = api_key.unwrap_or(get_env_var("OKX_API_KEY")?);
-        let api_secret = api_secret.unwrap_or(get_env_var("OKX_API_SECRET")?);
-        let api_passphrase = api_passphrase.unwrap_or(get_env_var("OKX_API_PASSPHRASE")?);
+        let api_key = get_or_env_var(api_key, "OKX_API_KEY")?;
+        let api_secret = get_or_env_var(api_secret, "OKX_API_SECRET")?;
+        let api_passphrase = get_or_env_var(api_passphrase, "OKX_API_PASSPHRASE")?;
         let base_url = base_url.unwrap_or(OKX_HTTP_URL.to_string());
 
         Ok(Self {
@@ -939,6 +974,7 @@ impl OKXHttpClient {
                 max_retries,
                 retry_delay_ms,
                 retry_delay_max_ms,
+                is_demo,
             )?),
             instruments_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_initialized: false,
@@ -969,7 +1005,7 @@ impl OKXHttpClient {
             OKXInstrumentType::Margin,
             OKXInstrumentType::Futures,
         ] {
-            if let Ok(instruments) = self.request_instruments(group).await {
+            if let Ok(instruments) = self.request_instruments(group, None).await {
                 let mut guard = self.instruments_cache.lock().unwrap();
                 for inst in instruments {
                     guard.insert(inst.raw_symbol().inner(), inst);
@@ -1003,6 +1039,12 @@ impl OKXHttpClient {
     /// Returns the public API key being used by the client.
     pub fn api_key(&self) -> Option<&str> {
         self.inner.credential.as_ref().map(|c| c.api_key.as_str())
+    }
+
+    /// Returns whether the client is configured for demo trading.
+    #[must_use]
+    pub fn is_demo(&self) -> bool {
+        self.inner.is_demo
     }
 
     /// Requests the current server time from OKX.
@@ -1105,6 +1147,97 @@ impl OKXHttpClient {
         Ok(account_state)
     }
 
+    /// Requests the fee rates and VIP level from OKX.
+    ///
+    /// Returns the VIP level (0-9) from the fee rate response.
+    /// Returns `None` if the fee rates cannot be retrieved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails.
+    pub async fn request_vip_level(&self) -> anyhow::Result<Option<OKXVipLevel>> {
+        // VIP level is account-wide, try SPOT first (most common)
+        let params = GetTradeFeeParams {
+            inst_type: OKXInstrumentType::Spot,
+            inst_family: None,
+            uly: None,
+        };
+
+        match self.inner.http_get_trade_fee(params).await {
+            Ok(resp) => {
+                if let Some(fee_rate) = resp.first() {
+                    tracing::info!("Detected OKX VIP level: {}", fee_rate.level);
+                    return Ok(Some(fee_rate.level));
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Failed to query SPOT fee rates: {e}, trying other types");
+            }
+        }
+
+        // Try MARGIN for accounts with spot disabled but margin enabled
+        let params = GetTradeFeeParams {
+            inst_type: OKXInstrumentType::Margin,
+            inst_family: None,
+            uly: None,
+        };
+
+        match self.inner.http_get_trade_fee(params).await {
+            Ok(resp) => {
+                if let Some(fee_rate) = resp.first() {
+                    tracing::info!("Detected OKX VIP level: {}", fee_rate.level);
+                    return Ok(Some(fee_rate.level));
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Failed to query MARGIN fee rates: {e}, trying derivatives");
+            }
+        }
+
+        // Fallback to derivatives for accounts with spot/margin disabled.
+        // OKX sub-accounts can have selective permissions (e.g., USDT-margined only,
+        // inverse only, or specific instrument types), so we probe multiple common
+        // instrument families to find one that works for the account configuration.
+        let derivatives_types = [
+            (OKXInstrumentType::Swap, None),
+            (OKXInstrumentType::Swap, Some("BTC-USDT")),
+            (OKXInstrumentType::Swap, Some("ETH-USDT")),
+            (OKXInstrumentType::Swap, Some("BTC-USD")),
+            (OKXInstrumentType::Swap, Some("ETH-USD")),
+            (OKXInstrumentType::Futures, Some("BTC-USDT")),
+            (OKXInstrumentType::Futures, Some("ETH-USDT")),
+            (OKXInstrumentType::Futures, Some("BTC-USD")),
+            (OKXInstrumentType::Futures, Some("ETH-USD")),
+            (OKXInstrumentType::Option, Some("BTC-USD")),
+            (OKXInstrumentType::Option, Some("ETH-USD")),
+        ];
+
+        for (inst_type, inst_family) in derivatives_types {
+            let params = GetTradeFeeParams {
+                inst_type,
+                inst_family: inst_family.map(String::from),
+                uly: None,
+            };
+
+            match self.inner.http_get_trade_fee(params).await {
+                Ok(resp) => {
+                    if let Some(fee_rate) = resp.first() {
+                        tracing::info!("Detected OKX VIP level: {}", fee_rate.level);
+                        return Ok(Some(fee_rate.level));
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Failed to query {inst_type:?} fee rates (family: {inst_family:?}): {e}"
+                    );
+                }
+            }
+        }
+
+        tracing::warn!("Unable to query VIP level from any instrument type");
+        Ok(None)
+    }
+
     /// Sets the position mode for the account.
     ///
     /// Defaults to NetMode if no position mode is provided.
@@ -1125,8 +1258,7 @@ impl OKXHttpClient {
         match self.inner.http_set_position_mode(params).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                // Check if this is the "Invalid request type" error for accounts without derivatives
-                if let crate::http::error::OKXHttpError::OkxError {
+                if let OKXHttpError::OkxError {
                     error_code,
                     message,
                 } = &e
@@ -1150,9 +1282,15 @@ impl OKXHttpClient {
     pub async fn request_instruments(
         &self,
         instrument_type: OKXInstrumentType,
+        instrument_family: Option<String>,
     ) -> anyhow::Result<Vec<InstrumentAny>> {
         let mut params = GetInstrumentsParamsBuilder::default();
         params.inst_type(instrument_type);
+
+        if let Some(family) = instrument_family {
+            params.inst_family(family);
+        }
+
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
         let resp = self
@@ -1165,8 +1303,16 @@ impl OKXHttpClient {
 
         let mut instruments: Vec<InstrumentAny> = Vec::new();
         for inst in &resp {
-            if let Some(instrument_any) = parse_instrument_any(inst, ts_init)? {
-                instruments.push(instrument_any);
+            match parse_instrument_any(inst, ts_init) {
+                Ok(Some(instrument_any)) => {
+                    instruments.push(instrument_any);
+                }
+                Ok(None) => {
+                    // Unsupported instrument type, skip silently
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse instrument {}: {e}", inst.inst_id);
+                }
             }
         }
 
@@ -1509,8 +1655,7 @@ impl OKXHttpClient {
             let page_ceiling = if using_history { 100 } else { 300 };
             let remaining = limit
                 .filter(|&l| l > 0) // Treat limit=0 as no limit
-                .map(|l| (l as usize).saturating_sub(out.len()))
-                .unwrap_or(page_ceiling);
+                .map_or(page_ceiling, |l| (l as usize).saturating_sub(out.len()));
             let page_cap = remaining.min(page_ceiling);
 
             let mut p = GetCandlesticksParamsBuilder::default();
@@ -2313,7 +2458,7 @@ impl OKXHttpClient {
         let okx_side: OKXSide = order_side.into();
 
         // Map trigger type to OKX format
-        let trigger_px_type_enum = trigger_type.map(Into::into).unwrap_or(OKXTriggerType::Last);
+        let trigger_px_type_enum = trigger_type.map_or(OKXTriggerType::Last, Into::into);
 
         // Determine order price based on order type
         let order_px = if matches!(order_type, OrderType::StopLimit | OrderType::LimitIfTouched) {

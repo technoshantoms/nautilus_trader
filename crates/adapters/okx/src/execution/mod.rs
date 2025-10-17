@@ -36,7 +36,6 @@ use nautilus_model::{
     reports::ExecutionMassStatus,
 };
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
 
 use crate::{
     common::{
@@ -82,6 +81,7 @@ impl OKXExecutionClient {
                 config.max_retries,
                 config.retry_delay_initial_ms,
                 config.retry_delay_max_ms,
+                config.is_demo,
             )?
         } else {
             OKXHttpClient::new(
@@ -90,6 +90,7 @@ impl OKXExecutionClient {
                 config.max_retries,
                 config.retry_delay_initial_ms,
                 config.retry_delay_max_ms,
+                config.is_demo,
             )?
         };
 
@@ -140,14 +141,14 @@ impl OKXExecutionClient {
         for instrument_type in self.instrument_types() {
             let instruments = self
                 .http_client
-                .request_instruments(instrument_type)
+                .request_instruments(instrument_type, None)
                 .await
                 .with_context(|| {
                     format!("failed to request OKX instruments for {instrument_type:?}")
                 })?;
 
             if instruments.is_empty() {
-                warn!("No instruments returned for {instrument_type:?}");
+                tracing::warn!("No instruments returned for {instrument_type:?}");
                 continue;
             }
 
@@ -156,7 +157,9 @@ impl OKXExecutionClient {
         }
 
         if all_instruments.is_empty() {
-            warn!("Instrument bootstrap yielded no instruments; WebSocket submissions may fail");
+            tracing::warn!(
+                "Instrument bootstrap yielded no instruments; WebSocket submissions may fail"
+            );
         } else {
             self.ws_client.initialize_instruments_cache(all_instruments);
         }
@@ -303,7 +306,7 @@ impl OKXExecutionClient {
         let runtime = get_runtime();
         let handle = runtime.spawn(async move {
             if let Err(err) = fut.await {
-                warn!("{description} failed: {err:?}");
+                tracing::warn!("{description} failed: {err:?}");
             }
         });
 
@@ -363,7 +366,16 @@ impl ExecutionClient for OKXExecutionClient {
 
         self.ensure_instruments_initialized()?;
         self.started = true;
-        info!("OKX execution client {} started", self.core.client_id);
+        tracing::info!(
+            client_id = %self.core.client_id,
+            account_id = %self.core.account_id,
+            account_type = ?self.core.account_type,
+            trade_mode = ?self.trade_mode,
+            instrument_types = ?self.config.instrument_types,
+            use_fills_channel = self.config.use_fills_channel,
+            is_demo = self.config.is_demo,
+            "OKX execution client started"
+        );
         Ok(())
     }
 
@@ -378,7 +390,7 @@ impl ExecutionClient for OKXExecutionClient {
             handle.abort();
         }
         self.abort_pending_tasks();
-        info!("OKX execution client {} stopped", self.core.client_id);
+        tracing::info!("OKX execution client {} stopped", self.core.client_id);
         Ok(())
     }
 
@@ -389,7 +401,7 @@ impl ExecutionClient for OKXExecutionClient {
         let order = &cmd.order;
 
         if order.is_closed() {
-            warn!("Cannot submit closed order {}", order.client_order_id());
+            tracing::warn!("Cannot submit closed order {}", order.client_order_id());
             return Ok(());
         }
 
@@ -425,7 +437,7 @@ impl ExecutionClient for OKXExecutionClient {
         &self,
         cmd: &nautilus_common::messages::execution::SubmitOrderList,
     ) -> anyhow::Result<()> {
-        warn!(
+        tracing::warn!(
             "submit_order_list not yet implemented for OKX execution client (got {} orders)",
             cmd.order_list.orders.len()
         );
@@ -506,7 +518,7 @@ impl ExecutionClient for OKXExecutionClient {
         &self,
         cmd: &nautilus_common::messages::execution::QueryOrder,
     ) -> anyhow::Result<()> {
-        debug!(
+        tracing::debug!(
             "query_order not implemented for OKX execution client (client_order_id={})",
             cmd.client_order_id
         );
@@ -527,13 +539,21 @@ impl LiveExecutionClient for OKXExecutionClient {
         self.ws_client.wait_until_active(10.0).await?;
 
         for inst_type in self.instrument_types() {
+            tracing::info!(
+                "Subscribing to orders channel for instrument type: {:?}",
+                inst_type
+            );
             self.ws_client.subscribe_orders(inst_type).await?;
-            self.ws_client.subscribe_orders_algo(inst_type).await?;
+
+            // OKX doesn't support algo orders channel for OPTIONS
+            if inst_type != OKXInstrumentType::Option {
+                self.ws_client.subscribe_orders_algo(inst_type).await?;
+            }
 
             if self.config.use_fills_channel
                 && let Err(err) = self.ws_client.subscribe_fills(inst_type).await
             {
-                warn!("Failed to subscribe to fills channel ({inst_type:?}): {err}");
+                tracing::warn!("Failed to subscribe to fills channel ({inst_type:?}): {err}");
             }
         }
 
@@ -543,7 +563,19 @@ impl LiveExecutionClient for OKXExecutionClient {
         self.refresh_account_state().await?;
 
         self.connected = true;
-        info!("OKX execution client {} connected", self.core.client_id);
+        tracing::info!("OKX execution client {} connected", self.core.client_id);
+
+        // Query VIP level after connection is established (non-critical)
+        let http_client = self.http_client.clone();
+        let ws_client = self.ws_client.clone();
+        self.spawn_task("query_vip_level", async move {
+            if let Ok(Some(vip_level)) = http_client.request_vip_level().await {
+                ws_client.set_vip_level(vip_level);
+                tracing::info!("Set OKX VIP level to: {vip_level:?}");
+            }
+            Ok(())
+        });
+
         Ok(())
     }
 
@@ -554,7 +586,7 @@ impl LiveExecutionClient for OKXExecutionClient {
 
         self.http_client.cancel_all_requests();
         if let Err(err) = self.ws_client.close().await {
-            warn!("Error while closing OKX websocket: {err:?}");
+            tracing::warn!("Error while closing OKX websocket: {err:?}");
         }
 
         if let Some(handle) = self.ws_stream_handle.take() {
@@ -564,7 +596,7 @@ impl LiveExecutionClient for OKXExecutionClient {
         self.abort_pending_tasks();
 
         self.connected = false;
-        info!("OKX execution client {} disconnected", self.core.client_id);
+        tracing::info!("OKX execution client {} disconnected", self.core.client_id);
         Ok(())
     }
 
@@ -573,7 +605,7 @@ impl LiveExecutionClient for OKXExecutionClient {
         cmd: &nautilus_common::messages::execution::GenerateOrderStatusReport,
     ) -> anyhow::Result<Option<nautilus_model::reports::OrderStatusReport>> {
         let Some(instrument_id) = cmd.instrument_id else {
-            warn!("generate_order_status_report requires instrument_id: {cmd:?}");
+            tracing::warn!("generate_order_status_report requires instrument_id: {cmd:?}");
             return Ok(None);
         };
 
@@ -727,7 +759,9 @@ impl LiveExecutionClient for OKXExecutionClient {
         &self,
         lookback_mins: Option<u64>,
     ) -> anyhow::Result<Option<ExecutionMassStatus>> {
-        warn!("generate_mass_status not yet implemented (lookback_mins={lookback_mins:?})");
+        tracing::warn!(
+            "generate_mass_status not yet implemented (lookback_mins={lookback_mins:?})"
+        );
         Ok(None)
     }
 }
@@ -780,20 +814,22 @@ fn dispatch_ws_message(message: NautilusWsMessage) {
             dispatch_order_event(OrderEventAny::ModifyRejected(event));
         }
         NautilusWsMessage::Error(err) => {
-            warn!(
+            tracing::warn!(
                 "OKX websocket error: code={} message={} conn_id={:?}",
-                err.code, err.message, err.conn_id
+                err.code,
+                err.message,
+                err.conn_id
             );
         }
         NautilusWsMessage::Reconnected => {
-            info!("OKX websocket reconnected");
+            tracing::info!("OKX websocket reconnected");
         }
         NautilusWsMessage::Deltas(_)
         | NautilusWsMessage::Raw(_)
         | NautilusWsMessage::Data(_)
         | NautilusWsMessage::FundingRates(_)
         | NautilusWsMessage::Instrument(_) => {
-            debug!("Ignoring OKX websocket data message");
+            tracing::debug!("Ignoring OKX websocket data message");
         }
     }
 }
@@ -812,14 +848,14 @@ fn dispatch_execution_report(report: ExecutionReport) {
             let exec_report =
                 nautilus_common::messages::ExecutionReport::OrderStatus(Box::new(order_report));
             if let Err(e) = sender.send(ExecutionEvent::Report(exec_report)) {
-                warn!("Failed to send order status report: {e}");
+                tracing::warn!("Failed to send order status report: {e}");
             }
         }
         ExecutionReport::Fill(fill_report) => {
             let exec_report =
                 nautilus_common::messages::ExecutionReport::Fill(Box::new(fill_report));
             if let Err(e) = sender.send(ExecutionEvent::Report(exec_report)) {
-                warn!("Failed to send fill report: {e}");
+                tracing::warn!("Failed to send fill report: {e}");
             }
         }
     }
@@ -828,7 +864,7 @@ fn dispatch_execution_report(report: ExecutionReport) {
 fn dispatch_order_event(event: OrderEventAny) {
     let sender = get_exec_event_sender();
     if let Err(e) = sender.send(ExecutionEvent::Order(event)) {
-        warn!("Failed to send order event: {e}");
+        tracing::warn!("Failed to send order event: {e}");
     }
 }
 

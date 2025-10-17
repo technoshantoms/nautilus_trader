@@ -24,10 +24,12 @@ from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.common.enums import LogLevel
+from nautilus_trader.common.secure import mask_api_key
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.core.datetime import ensure_pydatetime_utc
 from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
+from nautilus_trader.core.nautilus_pyo3 import OKXMarginMode
 from nautilus_trader.core.nautilus_pyo3 import OKXTradeMode
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import CancelAllOrders
@@ -60,6 +62,7 @@ from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import CurrencyPair
 from nautilus_trader.model.orders import Order
 
 
@@ -101,11 +104,7 @@ class OKXExecutionClient(LiveExecutionClient):
     ) -> None:
         PyCondition.not_empty(config.instrument_types, "config.instrument_types")
 
-        # Determine account type based on instrument types
-        if instrument_provider.instrument_types == (OKXInstrumentType.SPOT,):
-            account_type = AccountType.CASH
-        else:
-            account_type = AccountType.MARGIN
+        account_type = self._derive_account_type(instrument_provider, config)
 
         super().__init__(
             loop=loop,
@@ -131,7 +130,9 @@ class OKXExecutionClient(LiveExecutionClient):
         self._config = config
         self._log.info(f"config.instrument_types={instrument_types}", LogColor.BLUE)
         self._log.info(f"config.contract_types={contract_types}", LogColor.BLUE)
+        self._log.info(f"config.is_demo={config.is_demo}", LogColor.BLUE)
         self._log.info(f"{config.margin_mode=}", LogColor.BLUE)
+        self._log.info(f"{config.use_spot_margin=}", LogColor.BLUE)
         self._log.info(f"{config.http_timeout_secs=}", LogColor.BLUE)
         self._log.info(f"{config.use_fills_channel=}", LogColor.BLUE)
         self._log.info(f"{config.use_mm_mass_cancel=}", LogColor.BLUE)
@@ -148,7 +149,9 @@ class OKXExecutionClient(LiveExecutionClient):
 
         # HTTP API
         self._http_client = client
-        self._log.info(f"REST API key {self._http_client.api_key}", LogColor.BLUE)
+        if self._http_client.api_key:
+            masked_key = mask_api_key(self._http_client.api_key)
+            self._log.info(f"REST API key {masked_key}", LogColor.BLUE)
 
         # Track algo order IDs for cancellation
         self._algo_order_ids: dict[ClientOrderId, str] = {}
@@ -169,15 +172,37 @@ class OKXExecutionClient(LiveExecutionClient):
         )
         self._ws_business_client_futures: set[asyncio.Future] = set()
 
-        if account_type == AccountType.CASH:
-            self._trade_mode = OKXTradeMode.CASH
-        else:
-            # TODO: Initially support isolated margin only
-            self._trade_mode = OKXTradeMode.ISOLATED
+        # Determine trade mode based on account type and configuration
+        self._trade_mode = self._derive_trade_mode(account_type, config)
 
     @property
     def okx_instrument_provider(self) -> OKXInstrumentProvider:
         return self._instrument_provider
+
+    def _derive_account_type(
+        self,
+        instrument_provider: OKXInstrumentProvider,
+        config: OKXExecClientConfig,
+    ) -> AccountType:
+        is_spot_only = instrument_provider.instrument_types == (OKXInstrumentType.SPOT,)
+        if is_spot_only and not config.use_spot_margin:
+            return AccountType.CASH
+        return AccountType.MARGIN
+
+    def _derive_trade_mode(
+        self,
+        account_type: AccountType,
+        config: OKXExecClientConfig,
+    ) -> OKXTradeMode:
+        is_cross_margin = config.margin_mode == OKXMarginMode.CROSS
+
+        if account_type == AccountType.CASH:
+            if not config.use_spot_margin:
+                return OKXTradeMode.CASH
+            # SPOT margin supports CROSS for leverage; ISOLATED is limited to copy or lead traders
+            return OKXTradeMode.CROSS if is_cross_margin else OKXTradeMode.ISOLATED
+
+        return OKXTradeMode.CROSS if is_cross_margin else OKXTradeMode.ISOLATED
 
     async def _connect(self) -> None:
         await self._instrument_provider.initialize()
@@ -199,7 +224,11 @@ class OKXExecutionClient(LiveExecutionClient):
         # Wait for connection to be established
         await self._ws_client.wait_until_active(timeout_secs=10.0)
         self._log.info(f"Connected to {self._ws_client.url}", LogColor.BLUE)
-        self._log.info(f"Private websocket API key {self._ws_client.api_key}", LogColor.BLUE)
+
+        if self._ws_client.api_key:
+            masked_key = mask_api_key(self._ws_client.api_key)
+            self._log.info(f"WebSocket API key {masked_key}", LogColor.BLUE)
+
         self._log.info("OKX API key authenticated", LogColor.GREEN)
 
         await self._ws_business_client.connect(
@@ -215,8 +244,15 @@ class OKXExecutionClient(LiveExecutionClient):
         )
 
         for instrument_type in self._instrument_provider._instrument_types:
+            self._log.info(
+                f"Subscribing to orders channel for instrument type: {instrument_type}",
+                LogColor.BLUE,
+            )
             await self._ws_client.subscribe_orders(instrument_type)
-            await self._ws_business_client.subscribe_orders_algo(instrument_type)
+
+            # OKX doesn't support algo orders channel for OPTIONS
+            if instrument_type != OKXInstrumentType.OPTION:
+                await self._ws_business_client.subscribe_orders_algo(instrument_type)
 
             # Only subscribe to fills channel if VIP5+ (configurable)
             if self._config.use_fills_channel:
@@ -603,7 +639,7 @@ class OKXExecutionClient(LiveExecutionClient):
 
         return reports
 
-    async def generate_position_status_reports(
+    async def generate_position_status_reports(  # noqa: C901 (too complex)
         self,
         command: GeneratePositionStatusReports,
     ) -> list[PositionStatusReport]:
@@ -622,21 +658,15 @@ class OKXExecutionClient(LiveExecutionClient):
 
         try:
             if command.instrument_id:
-                pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(
-                    command.instrument_id.value,
-                )
-                response = await self._http_client.request_position_status_reports(
-                    account_id=self.pyo3_account_id,
-                    instrument_id=pyo3_instrument_id,
-                )
+                # Check if this is a SPOT instrument (SPOT instruments don't have positions)
+                instrument = self._cache.instrument(command.instrument_id)
+                if instrument is None:
+                    raise RuntimeError(
+                        f"Cannot create position report - instrument {command.instrument_id} not found in cache",
+                    )
 
-                if not response:
-                    instrument = self._cache.instrument(command.instrument_id)
-                    if instrument is None:
-                        raise RuntimeError(
-                            f"Cannot create FLAT position report - instrument {command.instrument_id} not found",
-                        )
-
+                # SPOT instruments (CurrencyPair) don't have positions - return FLAT
+                if isinstance(instrument, CurrencyPair):
                     report = PositionStatusReport.create_flat(
                         account_id=self.account_id,
                         instrument_id=command.instrument_id,
@@ -645,9 +675,37 @@ class OKXExecutionClient(LiveExecutionClient):
                     )
                     reports.append(report)
                 else:
-                    pyo3_reports.extend(response)
+                    # Derivatives have positions - query OKX
+                    pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(
+                        command.instrument_id.value,
+                    )
+                    response = await self._http_client.request_position_status_reports(
+                        account_id=self.pyo3_account_id,
+                        instrument_id=pyo3_instrument_id,
+                    )
+
+                    if not response:
+                        # No position on OKX - create FLAT report
+                        instrument = self._cache.instrument(command.instrument_id)
+                        if instrument is None:
+                            raise RuntimeError(
+                                f"Cannot create FLAT position report - instrument {command.instrument_id} not found in cache",
+                            )
+                        report = PositionStatusReport.create_flat(
+                            account_id=self.account_id,
+                            instrument_id=command.instrument_id,
+                            size_precision=instrument.size_precision,
+                            ts_init=self._clock.timestamp_ns(),
+                        )
+                        reports.append(report)
+                    else:
+                        pyo3_reports.extend(response)
             else:
                 for instrument_type in self._config.instrument_types:
+                    # SPOT trading uses CASH account and doesn't have positions
+                    if instrument_type == OKXInstrumentType.SPOT:
+                        continue
+
                     response = await self._http_client.request_position_status_reports(
                         account_id=self.pyo3_account_id,
                         instrument_type=instrument_type,
@@ -673,6 +731,48 @@ class OKXExecutionClient(LiveExecutionClient):
         return reports
 
     # -- COMMAND HANDLERS -------------------------------------------------------------------------
+
+    def _get_trade_mode_for_order(
+        self,
+        instrument_id: InstrumentId,
+        params: dict[str, Any] | None,
+    ) -> OKXTradeMode:
+        if params:
+            td_mode = params.get("td_mode")
+            if td_mode:
+                try:
+                    return OKXTradeMode(td_mode)
+                except ValueError:
+                    self._log.warning(
+                        f"Invalid td_mode '{td_mode}', valid modes: 'cash', 'isolated', 'cross', 'spot_isolated'",
+                    )
+
+        instrument = self._cache.instrument(instrument_id)
+        if instrument is None:
+            self._log.warning(
+                f"Instrument {instrument_id} not found in cache, using default trade mode",
+            )
+            return self._trade_mode
+
+        if isinstance(instrument, CurrencyPair):
+            # SPOT trading
+            if self._config.use_spot_margin:
+                # Use CROSS or ISOLATED margin mode for spot margin trading
+                # Note: SPOT_ISOLATED is only available for copy traders
+                return (
+                    OKXTradeMode.CROSS
+                    if self._config.margin_mode == OKXMarginMode.CROSS
+                    else OKXTradeMode.ISOLATED
+                )
+            else:
+                return OKXTradeMode.CASH
+        else:
+            # Derivatives trading
+            return (
+                OKXTradeMode.CROSS
+                if self._config.margin_mode == OKXMarginMode.CROSS
+                else OKXTradeMode.ISOLATED
+            )
 
     async def _query_account(self, _command: QueryAccount) -> None:
         # TODO: Specific account ID (sub account) not yet supported
@@ -727,19 +827,7 @@ class OKXExecutionClient(LiveExecutionClient):
             time_in_force_to_pyo3(order.time_in_force) if order.time_in_force else None
         )
 
-        td_mode = self._trade_mode
-
-        if command.params:
-            td_mode_str = command.params.get("td_mode")
-            if td_mode_str:
-                try:
-                    td_mode = OKXTradeMode(td_mode_str)
-                except ValueError:
-                    self._log.warning(
-                        f"Failed to parse OKXTradeMode: Valid modes are 'cash', 'isolated', 'cross', 'spot_isolated', "
-                        f"falling back to '{str(self._trade_mode).lower()}'",
-                    )
-                    td_mode = self._trade_mode
+        td_mode = self._get_trade_mode_for_order(order.instrument_id, command.params)
 
         try:
             await self._ws_client.submit_order(
@@ -787,13 +875,7 @@ class OKXExecutionClient(LiveExecutionClient):
             trigger_type_to_pyo3(order.trigger_type) if hasattr(order, "trigger_type") else None
         )
 
-        td_mode = self._trade_mode
-        if command.params and "td_mode" in command.params:
-            td_mode_str = command.params["td_mode"]
-            try:
-                td_mode = OKXTradeMode(td_mode_str)
-            except ValueError:
-                self._log.warning(f"Invalid trade mode '{td_mode_str}', using default")
+        td_mode = self._get_trade_mode_for_order(order.instrument_id, command.params)
 
         try:
             response = await self._http_client.place_algo_order(
@@ -1129,6 +1211,12 @@ class OKXExecutionClient(LiveExecutionClient):
         self,
         pyo3_report: nautilus_pyo3.OrderStatusReport,
     ) -> None:
+        self._log.debug(
+            f"Received order status report: {pyo3_report.client_order_id!r}, "
+            f"status={pyo3_report.order_status}, is_connected={self.is_connected}",
+            LogColor.MAGENTA,
+        )
+
         # Discard order status reports until account is properly initialized
         # Reconciliation will handle getting the current state of open orders
         if not self.is_connected or not self.account_id or not self._cache.account(self.account_id):

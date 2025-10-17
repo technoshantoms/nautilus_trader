@@ -853,18 +853,25 @@ impl BitmexHttpClient {
         max_requests_per_second: Option<u32>,
         max_requests_per_minute: Option<u32>,
     ) -> anyhow::Result<Self> {
-        let api_key = api_key.or_else(|| get_env_var("BITMEX_API_KEY").ok());
-        let api_secret = api_secret.or_else(|| get_env_var("BITMEX_API_SECRET").ok());
-
-        // Determine testnet from URL if provided
+        // Determine testnet from URL first to select correct environment variables
         let testnet = base_url.as_ref().is_some_and(|url| url.contains("testnet"));
+
+        // Choose environment variables based on testnet flag
+        let (key_var, secret_var) = if testnet {
+            ("BITMEX_TESTNET_API_KEY", "BITMEX_TESTNET_API_SECRET")
+        } else {
+            ("BITMEX_API_KEY", "BITMEX_API_SECRET")
+        };
+
+        let api_key = api_key.or_else(|| get_env_var(key_var).ok());
+        let api_secret = api_secret.or_else(|| get_env_var(secret_var).ok());
 
         // If we're trying to create an authenticated client, we need both key and secret
         if api_key.is_some() && api_secret.is_none() {
-            anyhow::bail!("BITMEX_API_SECRET is required when BITMEX_API_KEY is provided");
+            anyhow::bail!("{secret_var} is required when {key_var} is provided");
         }
         if api_key.is_none() && api_secret.is_some() {
-            anyhow::bail!("BITMEX_API_KEY is required when BITMEX_API_SECRET is provided");
+            anyhow::bail!("{key_var} is required when {secret_var} is provided");
         }
 
         Self::new(
@@ -1108,7 +1115,7 @@ impl BitmexHttpClient {
     /// # Panics
     ///
     /// Panics if the instruments cache mutex is poisoned.
-    pub fn add_instrument(&mut self, instrument: InstrumentAny) {
+    pub fn add_instrument(&self, instrument: InstrumentAny) {
         self.instruments_cache
             .lock()
             .unwrap()
@@ -1154,10 +1161,30 @@ impl BitmexHttpClient {
         let ts_init = self.generate_ts_init();
 
         let mut parsed_instruments = Vec::new();
+        let mut failed_count = 0;
+        let total_count = instruments.len();
+
         for inst in instruments {
             if let Some(instrument_any) = parse_instrument_any(&inst, ts_init) {
                 parsed_instruments.push(instrument_any);
+            } else {
+                failed_count += 1;
+                tracing::error!(
+                    "Failed to parse instrument: symbol={}, type={:?}, state={:?} - instrument will not be cached",
+                    inst.symbol,
+                    inst.instrument_type,
+                    inst.state
+                );
             }
+        }
+
+        if failed_count > 0 {
+            tracing::error!(
+                "Instrument parse failures: {} failed out of {} total ({}  successfully parsed)",
+                failed_count,
+                total_count,
+                parsed_instruments.len()
+            );
         }
 
         Ok(parsed_instruments)
@@ -1460,8 +1487,7 @@ impl BitmexHttpClient {
         if let Some(BitmexOrderStatus::Rejected) = order.ord_status {
             let reason = order
                 .ord_rej_reason
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "No reason provided".to_string());
+                .map_or_else(|| "No reason provided".to_string(), |r| r.to_string());
             anyhow::bail!("Order rejected: {reason}");
         }
 
@@ -1534,6 +1560,9 @@ impl BitmexHttpClient {
         // BitMEX API requires either client order IDs or venue order IDs, not both
         // Prioritize venue order IDs if both are provided
         if let Some(venue_order_ids) = venue_order_ids {
+            if venue_order_ids.is_empty() {
+                anyhow::bail!("venue_order_ids cannot be empty");
+            }
             params.order_id(
                 venue_order_ids
                     .iter()
@@ -1541,6 +1570,9 @@ impl BitmexHttpClient {
                     .collect::<Vec<_>>(),
             );
         } else if let Some(client_order_ids) = client_order_ids {
+            if client_order_ids.is_empty() {
+                anyhow::bail!("client_order_ids cannot be empty");
+            }
             params.cl_ord_id(
                 client_order_ids
                     .iter()
@@ -1669,8 +1701,7 @@ impl BitmexHttpClient {
         if let Some(BitmexOrderStatus::Rejected) = order.ord_status {
             let reason = order
                 .ord_rej_reason
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "No reason provided".to_string());
+                .map_or_else(|| "No reason provided".to_string(), |r| r.to_string());
             anyhow::bail!("Order modification rejected: {reason}");
         }
 

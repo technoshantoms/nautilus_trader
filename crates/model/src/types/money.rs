@@ -109,7 +109,7 @@ pub const MONEY_MIN: f64 = -9_223_372_036.0;
 #[derive(Clone, Copy, Eq)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", frozen)
 )]
 pub struct Money {
     /// Represents the raw fixed-point amount, with `currency.precision` defining the number of decimal places.
@@ -522,7 +522,7 @@ impl<'de> Deserialize<'de> for Money {
         D: Deserializer<'de>,
     {
         let money_str: String = Deserialize::deserialize(deserializer)?;
-        Ok(Money::from(money_str.as_str()))
+        Ok(Self::from(money_str.as_str()))
     }
 }
 

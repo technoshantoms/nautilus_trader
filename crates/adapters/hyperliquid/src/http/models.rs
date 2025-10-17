@@ -13,6 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
@@ -147,6 +148,16 @@ pub struct SpotMeta {
     pub universe: Vec<SpotPair>,
 }
 
+/// EVM contract information for a spot token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EvmContract {
+    /// EVM contract address (20 bytes).
+    pub address: Address,
+    /// Extra wei decimals for EVM precision (can be negative).
+    pub evm_extra_wei_decimals: i32,
+}
+
 /// A single spot token from the tokens list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -163,12 +174,15 @@ pub struct SpotToken {
     pub token_id: String,
     /// Whether this is the canonical token.
     pub is_canonical: bool,
-    /// Optional EVM contract address.
+    /// Optional EVM contract information.
     #[serde(default)]
-    pub evm_contract: Option<String>,
+    pub evm_contract: Option<EvmContract>,
     /// Optional full name.
     #[serde(default)]
     pub full_name: Option<String>,
+    /// Optional deployer trading fee share.
+    #[serde(default)]
+    pub deployer_trading_fee_share: Option<String>,
 }
 
 /// A single spot pair from the universe.
@@ -261,11 +275,9 @@ pub struct HyperliquidLevel {
 }
 
 /// Represents user fills response from `POST /info`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HyperliquidFills {
-    #[serde(default)]
-    pub fills: Vec<HyperliquidFill>,
-}
+///
+/// The Hyperliquid API returns fills directly as an array, not wrapped in an object.
+pub type HyperliquidFills = Vec<HyperliquidFill>;
 
 /// Represents an individual fill from user fills.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,20 +350,56 @@ pub struct HyperliquidOrderInfo {
     pub orig_sz: String,
 }
 
+/// ECC signature components for Hyperliquid exchange requests.
+#[derive(Debug, Clone, Serialize)]
+pub struct HyperliquidSignature {
+    /// R component of the signature.
+    pub r: String,
+    /// S component of the signature.
+    pub s: String,
+    /// V component (recovery ID) of the signature.
+    pub v: u64,
+}
+
+impl HyperliquidSignature {
+    /// Parse a hex signature string (0x + 64 hex r + 64 hex s + 2 hex v) into components.
+    pub fn from_hex(sig_hex: &str) -> Result<Self, String> {
+        let sig_hex = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
+
+        if sig_hex.len() != 130 {
+            return Err(format!(
+                "Invalid signature length: expected 130 hex chars, got {}",
+                sig_hex.len()
+            ));
+        }
+
+        let r = format!("0x{}", &sig_hex[0..64]);
+        let s = format!("0x{}", &sig_hex[64..128]);
+        let v = u64::from_str_radix(&sig_hex[128..130], 16)
+            .map_err(|e| format!("Failed to parse v component: {}", e))?;
+
+        Ok(Self { r, s, v })
+    }
+}
+
 /// Represents an exchange action request wrapper for `POST /exchange`.
 #[derive(Debug, Clone, Serialize)]
 pub struct HyperliquidExchangeRequest<T> {
     /// The action to perform.
+    #[serde(rename = "action")]
     pub action: T,
     /// Request nonce for replay protection.
     #[serde(rename = "nonce")]
     pub nonce: u64,
     /// ECC signature over the action.
     #[serde(rename = "signature")]
-    pub signature: String,
+    pub signature: HyperliquidSignature,
     /// Optional vault address for sub-account trading.
     #[serde(rename = "vaultAddress", skip_serializing_if = "Option::is_none")]
     pub vault_address: Option<String>,
+    /// Optional expiration time in milliseconds.
+    #[serde(rename = "expiresAfter", skip_serializing_if = "Option::is_none")]
+    pub expires_after: Option<u64>,
 }
 
 impl<T> HyperliquidExchangeRequest<T>
@@ -359,23 +407,30 @@ where
     T: Serialize,
 {
     /// Create a new exchange request with the given action.
-    pub fn new(action: T, nonce: u64, signature: String) -> Self {
-        Self {
+    pub fn new(action: T, nonce: u64, signature: String) -> Result<Self, String> {
+        Ok(Self {
             action,
             nonce,
-            signature,
+            signature: HyperliquidSignature::from_hex(&signature)?,
             vault_address: None,
-        }
+            expires_after: None,
+        })
     }
 
     /// Create a new exchange request with vault address for sub-account trading.
-    pub fn with_vault(action: T, nonce: u64, signature: String, vault_address: String) -> Self {
-        Self {
+    pub fn with_vault(
+        action: T,
+        nonce: u64,
+        signature: String,
+        vault_address: String,
+    ) -> Result<Self, String> {
+        Ok(Self {
             action,
             nonce,
-            signature,
+            signature: HyperliquidSignature::from_hex(&signature)?,
             vault_address: Some(vault_address),
-        }
+            expires_after: None,
+        })
     }
 
     /// Convert to JSON value for signing purposes.
@@ -729,7 +784,7 @@ pub mod execution_cloid {
                     .map_err(|_| "Invalid hex character in CLOID".to_string())?;
             }
 
-            Ok(Cloid(bytes))
+            Ok(Self(bytes))
         }
 
         /// Converts the CLOID to a hex string with `0x` prefix.
@@ -764,7 +819,7 @@ pub mod execution_cloid {
             D: Deserializer<'de>,
         {
             let s = String::deserialize(deserializer)?;
-            Cloid::from_hex(&s).map_err(D::Error::custom)
+            Self::from_hex(&s).map_err(D::Error::custom)
         }
     }
 }
@@ -994,7 +1049,7 @@ pub struct HyperliquidExecTwapRequest {
 /// through the exchange API. The serialization uses the exact action type
 /// names expected by Hyperliquid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type")]
 pub enum HyperliquidExecAction {
     /// Place one or more orders.
     #[serde(rename = "order")]
@@ -1002,7 +1057,7 @@ pub enum HyperliquidExecAction {
         /// List of orders to place.
         orders: Vec<HyperliquidExecPlaceOrderRequest>,
         /// Grouping strategy for TP/SL orders.
-        #[serde(default, skip_serializing_if = "is_default_exec_grouping")]
+        #[serde(default)]
         grouping: HyperliquidExecGrouping,
         /// Optional builder fee.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1113,11 +1168,6 @@ pub enum HyperliquidExecAction {
     /// No-operation to invalidate pending nonces.
     #[serde(rename = "noop")]
     Noop,
-}
-
-/// Helper function to check if grouping is the default value for exchange endpoint.
-fn is_default_exec_grouping(grouping: &HyperliquidExecGrouping) -> bool {
-    matches!(grouping, HyperliquidExecGrouping::Na)
 }
 
 /// Exchange request envelope for the `/exchange` endpoint.

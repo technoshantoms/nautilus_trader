@@ -38,8 +38,8 @@ use nautilus_model::{
         },
     },
     enums::{
-        AccountType, AggregationSource, AggressorSide, AssetClass, CurrencyType, LiquiditySide,
-        OptionKind, OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce,
+        AccountType, AggregationSource, AggressorSide, AssetClass, LiquiditySide, OptionKind,
+        OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce,
     },
     events::AccountState,
     identifiers::{AccountId, ClientOrderId, InstrumentId, Symbol, TradeId, Venue, VenueOrderId},
@@ -57,6 +57,7 @@ use crate::{
         consts::OKX_VENUE,
         enums::{
             OKXExecType, OKXInstrumentType, OKXOrderStatus, OKXOrderType, OKXPositionSide, OKXSide,
+            OKXVipLevel,
         },
         models::OKXInstrument,
     },
@@ -139,14 +140,68 @@ where
     }
 }
 
+/// Deserializes an OKX VIP level string into [`OKXVipLevel`].
+///
+/// OKX returns VIP levels in multiple formats:
+/// - "VIP0", "VIP1", ..., "VIP9" (VIP tier format)
+/// - "Lv0", "Lv1", ..., "Lv9" (Level format)
+/// - "0", "1", ..., "9" (bare numeric)
+/// - "" (empty string, defaults to VIP0)
+///
+/// This function handles all formats by stripping any prefix and parsing the numeric value.
+///
+/// # Errors
+///
+/// Returns an error if the string cannot be parsed into a valid VIP level.
+pub fn deserialize_vip_level<'de, D>(deserializer: D) -> Result<OKXVipLevel, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+
+    if s.is_empty() {
+        return Ok(OKXVipLevel::Vip0);
+    }
+
+    let s_lower = s.to_lowercase();
+    let level_str = s_lower
+        .strip_prefix("vip")
+        .or_else(|| s_lower.strip_prefix("lv"))
+        .unwrap_or(&s_lower);
+
+    let level_num = level_str
+        .parse::<u8>()
+        .map_err(|e| serde::de::Error::custom(format!("Invalid VIP level '{s}': {e}")))?;
+
+    Ok(OKXVipLevel::from(level_num))
+}
+
 /// Returns the currency either from the internal currency map or creates a default crypto.
-fn get_currency(code: &str) -> Currency {
+///
+/// If the code is empty, logs a warning with context and returns USDT as fallback.
+/// For unknown but valid codes, creates a new Currency (preserves newly listed OKX assets).
+fn get_currency_with_context(code: &str, context: Option<&str>) -> Currency {
+    let trimmed = code.trim();
+    let ctx = context.unwrap_or("unknown");
+
+    if trimmed.is_empty() {
+        tracing::warn!(
+            "get_currency called with empty code (context: {ctx}), using USDT as fallback"
+        );
+        return Currency::USDT();
+    }
+
     CURRENCY_MAP
         .lock()
         .unwrap()
-        .get(code)
+        .get(trimmed)
         .copied()
-        .unwrap_or(Currency::new(code, 8, 0, code, CurrencyType::Crypto))
+        .unwrap_or_else(|| {
+            // For unknown codes, create a new currency (8 decimals, crypto type)
+            // This preserves newly listed OKX assets that aren't in CURRENCY_MAP yet
+            use nautilus_model::enums::CurrencyType;
+            Currency::new(trimmed, 8, 0, trimmed, CurrencyType::Crypto)
+        })
 }
 
 /// Returns the [`OKXInstrumentType`] that corresponds to the supplied
@@ -235,6 +290,29 @@ pub fn parse_fee(value: Option<&str>, currency: Currency) -> anyhow::Result<Mone
     // OKX report positive fees with negative signs (i.e., fee charged)
     let fee_f64 = value.unwrap_or("0").parse::<f64>()?;
     Money::new_checked(-fee_f64, currency)
+}
+
+/// Parses OKX fee currency code, handling empty strings.
+///
+/// OKX sometimes returns empty fee currency codes.
+/// When the fee currency is empty, defaults to USDT and logs a warning for non-zero fees.
+pub fn parse_fee_currency(
+    fee_ccy: &str,
+    fee_amount: f64,
+    context: impl FnOnce() -> String,
+) -> Currency {
+    let trimmed = fee_ccy.trim();
+    if trimmed.is_empty() {
+        if fee_amount != 0.0 {
+            let ctx = context();
+            tracing::warn!(
+                "Empty fee_ccy in {ctx} with non-zero fee={fee_amount}, using USDT as fallback"
+            );
+        }
+        return Currency::USDT();
+    }
+
+    get_currency_with_context(trimmed, Some(&context()))
 }
 
 /// Parses OKX side to Nautilus aggressor side.
@@ -594,7 +672,10 @@ pub fn parse_fill_report(
     let last_px = parse_price(&detail.fill_px, price_precision)?;
     let last_qty = parse_quantity(&detail.fill_sz, size_precision)?;
     let fee_f64 = detail.fee.as_deref().unwrap_or("0").parse::<f64>()?;
-    let commission = Money::new(-fee_f64, Currency::from(&detail.fee_ccy));
+    let fee_currency = parse_fee_currency(&detail.fee_ccy, fee_f64, || {
+        format!("fill report for instrument_id={}", instrument_id)
+    });
+    let commission = Money::new(-fee_f64, fee_currency);
     let liquidity_side: LiquiditySide = detail.exec_type.into();
     let ts_event = parse_millisecond_timestamp(detail.ts);
 
@@ -905,9 +986,14 @@ fn parse_common_instrument_data(
     let instrument_id = parse_instrument_id(definition.inst_id);
     let raw_symbol = Symbol::from_ustr_unchecked(definition.inst_id);
 
+    // Validate tick_sz is not empty before parsing
+    if definition.tick_sz.is_empty() {
+        anyhow::bail!("`tick_sz` is empty");
+    }
+
     let price_increment = Price::from_str(&definition.tick_sz).map_err(|e| {
         anyhow::anyhow!(
-            "Failed to parse tick_sz '{}' into Price: {}",
+            "Failed to parse `tick_sz` '{}' into Price: {}",
             definition.tick_sz,
             e
         )
@@ -972,8 +1058,9 @@ impl InstrumentParser for SpotInstrumentParser {
         margin_fees: MarginAndFees,
         ts_init: UnixNanos,
     ) -> anyhow::Result<InstrumentAny> {
-        let base_currency = get_currency(&definition.base_ccy);
-        let quote_currency = get_currency(&definition.quote_ccy);
+        let context = format!("SPOT instrument {}", definition.inst_id);
+        let base_currency = get_currency_with_context(&definition.base_ccy, Some(&context));
+        let quote_currency = get_currency_with_context(&definition.quote_ccy, Some(&context));
 
         let instrument = CurrencyPair::new(
             common.instrument_id,
@@ -1043,13 +1130,14 @@ pub fn parse_swap_instrument(
 ) -> anyhow::Result<InstrumentAny> {
     let instrument_id = parse_instrument_id(definition.inst_id);
     let raw_symbol = Symbol::from_ustr_unchecked(definition.inst_id);
+    let context = format!("SWAP instrument {}", definition.inst_id);
     let (base_currency, quote_currency) = definition
         .uly
         .split_once('-')
         .ok_or_else(|| anyhow::anyhow!("Invalid underlying for swap: {}", definition.uly))?;
-    let base_currency = get_currency(base_currency);
-    let quote_currency = get_currency(quote_currency);
-    let settlement_currency = get_currency(&definition.settle_ccy);
+    let base_currency = get_currency_with_context(base_currency, Some(&context));
+    let quote_currency = get_currency_with_context(quote_currency, Some(&context));
+    let settlement_currency = get_currency_with_context(&definition.settle_ccy, Some(&context));
     let is_inverse = match definition.ct_type {
         OKXContractType::Linear => false,
         OKXContractType::Inverse => true,
@@ -1057,6 +1145,12 @@ pub fn parse_swap_instrument(
             anyhow::bail!("Invalid contract type for swap: {}", definition.ct_type)
         }
     };
+
+    // Validate tick_sz is not empty before parsing
+    if definition.tick_sz.is_empty() {
+        anyhow::bail!("tick_sz is empty");
+    }
+
     let price_increment = match Price::from_str(&definition.tick_sz) {
         Ok(price) => price,
         Err(e) => {
@@ -1137,13 +1231,14 @@ pub fn parse_futures_instrument(
 ) -> anyhow::Result<InstrumentAny> {
     let instrument_id = parse_instrument_id(definition.inst_id);
     let raw_symbol = Symbol::from_ustr_unchecked(definition.inst_id);
-    let underlying = get_currency(&definition.uly);
+    let context = format!("FUTURES instrument {}", definition.inst_id);
+    let underlying = get_currency_with_context(&definition.uly, Some(&context));
     let (_, quote_currency) = definition
         .uly
         .split_once('-')
         .ok_or_else(|| anyhow::anyhow!("Invalid underlying for Swap: {}", definition.uly))?;
-    let quote_currency = get_currency(quote_currency);
-    let settlement_currency = get_currency(&definition.settle_ccy);
+    let quote_currency = get_currency_with_context(quote_currency, Some(&context));
+    let settlement_currency = get_currency_with_context(&definition.settle_ccy, Some(&context));
     let is_inverse = match definition.ct_type {
         OKXContractType::Linear => false,
         OKXContractType::Inverse => true,
@@ -1159,7 +1254,13 @@ pub fn parse_futures_instrument(
         .ok_or_else(|| anyhow::anyhow!("`expiry_time` is required to parse Swap instrument"))?;
     let activation_ns = UnixNanos::from(millis_to_nanos(listing_time as f64));
     let expiration_ns = UnixNanos::from(millis_to_nanos(expiry_time as f64));
-    let price_increment = Price::from(definition.tick_sz.to_string());
+
+    // Validate tick_sz is not empty before parsing
+    if definition.tick_sz.is_empty() {
+        anyhow::bail!("tick_sz is empty");
+    }
+
+    let price_increment = Price::from(definition.tick_sz.clone());
     let size_increment = Quantity::from(&definition.lot_sz);
     let multiplier = Some(Quantity::from(&definition.ct_mult));
     let lot_size = Some(Quantity::from(&definition.lot_sz));
@@ -1222,10 +1323,11 @@ pub fn parse_option_instrument(
     let underlying = Ustr::from(&definition.uly);
     let option_kind: OptionKind = definition.opt_type.into();
     let strike_price = Price::from(&definition.stk);
+    let context = format!("OPTION instrument {}", definition.inst_id);
     let currency = definition
         .uly
         .split_once('-')
-        .map(|(_, quote_ccy)| get_currency(quote_ccy))
+        .map(|(_, quote_ccy)| get_currency_with_context(quote_ccy, Some(&context)))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "Invalid underlying for Option instrument: {}",
@@ -1240,7 +1342,13 @@ pub fn parse_option_instrument(
         .ok_or_else(|| anyhow::anyhow!("`expiry_time` is required to parse Option instrument"))?;
     let activation_ns = UnixNanos::from(millis_to_nanos(listing_time as f64));
     let expiration_ns = UnixNanos::from(millis_to_nanos(expiry_time as f64));
-    let price_increment = Price::from(definition.tick_sz.to_string());
+
+    // Validate tick_sz is not empty before parsing
+    if definition.tick_sz.is_empty() {
+        anyhow::bail!("tick_sz is empty");
+    }
+
+    let price_increment = Price::from(definition.tick_sz.clone());
     let multiplier = Quantity::from(&definition.ct_mult);
     let lot_size = Quantity::from(&definition.lot_sz);
     let max_quantity = Some(Quantity::from(&definition.max_mkt_sz));
@@ -1280,6 +1388,23 @@ pub fn parse_option_instrument(
 
 /// Parses an OKX account into a Nautilus account state.
 ///
+fn parse_balance_field(
+    value_str: &str,
+    field_name: &str,
+    currency: Currency,
+    ccy_str: &str,
+) -> Option<Money> {
+    match value_str.parse::<f64>() {
+        Ok(v) => Some(Money::new(v, currency)),
+        Err(e) => {
+            tracing::warn!(
+                "Skipping balance detail for {ccy_str} with invalid {field_name} '{value_str}': {e}"
+            );
+            None
+        }
+    }
+}
+
 /// # Errors
 ///
 /// Returns an error if the data cannot be parsed.
@@ -1290,12 +1415,49 @@ pub fn parse_account_state(
 ) -> anyhow::Result<AccountState> {
     let mut balances = Vec::new();
     for b in &okx_account.details {
-        let currency = Currency::from(b.ccy);
-        let total = Money::new(b.cash_bal.parse::<f64>()?, currency);
-        let free = Money::new(b.avail_bal.parse::<f64>()?, currency);
+        // Skip balances with empty or whitespace-only currency codes
+        let ccy_str = b.ccy.as_str().trim();
+        if ccy_str.is_empty() {
+            tracing::debug!(
+                "Skipping balance detail with empty currency code | raw_data={:?}",
+                b
+            );
+            continue;
+        }
+
+        // Attempt to parse the currency, skip if invalid
+        let currency = match Currency::from_str(ccy_str) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping balance detail with invalid currency code '{ccy_str}': {e} | raw_data={:?}",
+                    b
+                );
+                continue;
+            }
+        };
+
+        // Parse balance values, skip if invalid
+        let Some(total) = parse_balance_field(&b.cash_bal, "cash_bal", currency, ccy_str) else {
+            continue;
+        };
+
+        let Some(free) = parse_balance_field(&b.avail_bal, "avail_bal", currency, ccy_str) else {
+            continue;
+        };
+
         let locked = total - free;
         let balance = AccountBalance::new(total, locked, free);
         balances.push(balance);
+    }
+
+    // Ensure at least one balance exists (Nautilus requires non-empty balances)
+    // OKX may return empty details for certain account configurations
+    if balances.is_empty() {
+        let zero_currency = Currency::USD();
+        let zero_money = Money::new(0.0, zero_currency);
+        let zero_balance = AccountBalance::new(zero_money, zero_money, zero_money);
+        balances.push(zero_balance);
     }
 
     let mut margins = Vec::new();
@@ -1380,6 +1542,92 @@ mod tests {
             },
         },
     };
+
+    #[rstest]
+    fn test_parse_fee_currency_with_zero_fee_empty_string() {
+        let result = parse_fee_currency("", 0.0, || "test context".to_string());
+        assert_eq!(result, Currency::USDT());
+    }
+
+    #[rstest]
+    fn test_parse_fee_currency_with_zero_fee_valid_currency() {
+        let result = parse_fee_currency("BTC", 0.0, || "test context".to_string());
+        assert_eq!(result, Currency::BTC());
+    }
+
+    #[rstest]
+    fn test_parse_fee_currency_with_valid_currency() {
+        let result = parse_fee_currency("BTC", 0.001, || "test context".to_string());
+        assert_eq!(result, Currency::BTC());
+    }
+
+    #[rstest]
+    fn test_parse_fee_currency_with_empty_string_nonzero_fee() {
+        let result = parse_fee_currency("", 0.5, || "test context".to_string());
+        assert_eq!(result, Currency::USDT());
+    }
+
+    #[rstest]
+    fn test_parse_fee_currency_with_whitespace() {
+        let result = parse_fee_currency("  ETH  ", 0.002, || "test context".to_string());
+        assert_eq!(result, Currency::ETH());
+    }
+
+    #[rstest]
+    fn test_parse_fee_currency_with_unknown_code() {
+        // Unknown currency code should create a new Currency (8 decimals, crypto)
+        let result = parse_fee_currency("NEWTOKEN", 0.5, || "test context".to_string());
+        assert_eq!(result.code.as_str(), "NEWTOKEN");
+        assert_eq!(result.precision, 8);
+    }
+
+    #[rstest]
+    fn test_get_currency_with_context_valid() {
+        let result = get_currency_with_context("BTC", Some("test context"));
+        assert_eq!(result, Currency::BTC());
+    }
+
+    #[rstest]
+    fn test_get_currency_with_context_empty() {
+        let result = get_currency_with_context("", Some("test context"));
+        assert_eq!(result, Currency::USDT());
+    }
+
+    #[rstest]
+    fn test_get_currency_with_context_whitespace() {
+        let result = get_currency_with_context("  ", Some("test context"));
+        assert_eq!(result, Currency::USDT());
+    }
+
+    #[rstest]
+    fn test_get_currency_with_context_unknown() {
+        // Unknown codes should create a new Currency, preserving newly listed assets
+        let result = get_currency_with_context("NEWCOIN", Some("test context"));
+        assert_eq!(result.code.as_str(), "NEWCOIN");
+        assert_eq!(result.precision, 8);
+    }
+
+    #[rstest]
+    fn test_parse_balance_field_valid() {
+        let result = parse_balance_field("100.5", "test_field", Currency::BTC(), "BTC");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_f64(), 100.5);
+    }
+
+    #[rstest]
+    fn test_parse_balance_field_invalid_numeric() {
+        let result = parse_balance_field("not_a_number", "test_field", Currency::BTC(), "BTC");
+        assert!(result.is_none());
+    }
+
+    #[rstest]
+    fn test_parse_balance_field_empty() {
+        let result = parse_balance_field("", "test_field", Currency::BTC(), "BTC");
+        assert!(result.is_none());
+    }
+
+    // Note: Tests for parse_account_state with edge cases (empty currency codes, invalid values)
+    // are covered by the existing tests using test data files (e.g., http_get_account_balance.json)
 
     #[rstest]
     fn test_parse_trades() {
@@ -2400,5 +2648,72 @@ mod tests {
             bar.bar_type, bar_type,
             "BarType must be preserved exactly through parsing"
         );
+    }
+
+    #[rstest]
+    fn test_deserialize_vip_level_all_formats() {
+        use serde::Deserialize;
+        use serde_json;
+
+        #[derive(Deserialize)]
+        struct TestFeeRate {
+            #[serde(deserialize_with = "crate::common::parse::deserialize_vip_level")]
+            level: OKXVipLevel,
+        }
+
+        // Test VIP prefix format
+        let json = r#"{"level":"VIP4"}"#;
+        let result: TestFeeRate = serde_json::from_str(json).unwrap();
+        assert_eq!(result.level, OKXVipLevel::Vip4);
+
+        let json = r#"{"level":"VIP5"}"#;
+        let result: TestFeeRate = serde_json::from_str(json).unwrap();
+        assert_eq!(result.level, OKXVipLevel::Vip5);
+
+        // Test Lv prefix format
+        let json = r#"{"level":"Lv1"}"#;
+        let result: TestFeeRate = serde_json::from_str(json).unwrap();
+        assert_eq!(result.level, OKXVipLevel::Vip1);
+
+        let json = r#"{"level":"Lv0"}"#;
+        let result: TestFeeRate = serde_json::from_str(json).unwrap();
+        assert_eq!(result.level, OKXVipLevel::Vip0);
+
+        let json = r#"{"level":"Lv9"}"#;
+        let result: TestFeeRate = serde_json::from_str(json).unwrap();
+        assert_eq!(result.level, OKXVipLevel::Vip9);
+    }
+
+    #[rstest]
+    fn test_deserialize_vip_level_empty_string() {
+        use serde::Deserialize;
+        use serde_json;
+
+        #[derive(Deserialize)]
+        struct TestFeeRate {
+            #[serde(deserialize_with = "crate::common::parse::deserialize_vip_level")]
+            level: OKXVipLevel,
+        }
+
+        // Empty string should default to VIP0
+        let json = r#"{"level":""}"#;
+        let result: TestFeeRate = serde_json::from_str(json).unwrap();
+        assert_eq!(result.level, OKXVipLevel::Vip0);
+    }
+
+    #[rstest]
+    fn test_deserialize_vip_level_without_prefix() {
+        use serde::Deserialize;
+        use serde_json;
+
+        #[derive(Deserialize)]
+        struct TestFeeRate {
+            #[serde(deserialize_with = "crate::common::parse::deserialize_vip_level")]
+            level: OKXVipLevel,
+        }
+
+        let json = r#"{"level":"5"}"#;
+        let result: TestFeeRate = serde_json::from_str(json).unwrap();
+        assert_eq!(result.level, OKXVipLevel::Vip5);
     }
 }

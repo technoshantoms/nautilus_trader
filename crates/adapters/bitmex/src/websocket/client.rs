@@ -102,6 +102,7 @@ pub struct BitmexWebSocketClient {
     subscriptions: SubscriptionState,
     instruments_cache: Arc<AHashMap<Ustr, InstrumentAny>>,
     order_type_cache: Arc<DashMap<ClientOrderId, OrderType>>,
+    order_symbol_cache: Arc<DashMap<ClientOrderId, Ustr>>,
 }
 
 impl BitmexWebSocketClient {
@@ -138,6 +139,7 @@ impl BitmexWebSocketClient {
             subscriptions: SubscriptionState::new(),
             instruments_cache: Arc::new(AHashMap::new()),
             order_type_cache: Arc::new(DashMap::new()),
+            order_symbol_cache: Arc::new(DashMap::new()),
         })
     }
 
@@ -198,11 +200,20 @@ impl BitmexWebSocketClient {
     /// Initialize the instruments cache with the given `instruments`.
     pub fn initialize_instruments_cache(&mut self, instruments: Vec<InstrumentAny>) {
         let mut instruments_cache: AHashMap<Ustr, InstrumentAny> = AHashMap::new();
+        let mut count = 0;
+
+        log::info!("Initializing BitMEX instrument cache...");
+
         for inst in instruments {
-            instruments_cache.insert(inst.symbol().inner(), inst.clone());
+            let symbol = inst.symbol().inner();
+            instruments_cache.insert(symbol, inst.clone());
+            log::debug!("Cached instrument: {symbol}");
+            count += 1;
         }
 
         self.instruments_cache = Arc::new(instruments_cache);
+
+        log::info!("BitMEX instrument cache initialized with {count} instruments");
     }
 
     /// Connect to the BitMEX WebSocket server.
@@ -228,6 +239,7 @@ impl BitmexWebSocketClient {
         let subscriptions = self.subscriptions.clone();
         let instruments_cache = self.instruments_cache.clone();
         let order_type_cache = self.order_type_cache.clone();
+        let order_symbol_cache = self.order_symbol_cache.clone();
 
         let stream_handle = get_runtime().spawn(async move {
             let mut handler = BitmexWsMessageHandler::new(
@@ -239,6 +251,7 @@ impl BitmexWebSocketClient {
                 subscriptions.clone(),
                 instruments_cache,
                 order_type_cache,
+                order_symbol_cache,
             );
 
             // Run message processing with reconnection handling
@@ -286,7 +299,7 @@ impl BitmexWebSocketClient {
                         topics_to_restore.sort();
 
                         let auth_rx_opt = if let Some(cred) = &credential {
-                            match BitmexWebSocketClient::issue_authentication_request(
+                            match Self::issue_authentication_request(
                                 &inner_client,
                                 cred,
                                 &auth_tracker,
@@ -334,7 +347,7 @@ impl BitmexWebSocketClient {
                                 state_for_task.mark_subscribe(topic.as_str());
                             }
 
-                            if let Err(e) = BitmexWebSocketClient::send_topics(
+                            if let Err(e) = Self::send_topics(
                                 &inner_for_task,
                                 BitmexWsOperation::Subscribe,
                                 all_topics.clone(),
@@ -1307,6 +1320,7 @@ struct BitmexWsMessageHandler {
     subscriptions: SubscriptionState,
     instruments_cache: Arc<AHashMap<Ustr, InstrumentAny>>,
     order_type_cache: Arc<DashMap<ClientOrderId, OrderType>>,
+    order_symbol_cache: Arc<DashMap<ClientOrderId, Ustr>>,
     quote_cache: QuoteCache,
 }
 
@@ -1322,6 +1336,7 @@ impl BitmexWsMessageHandler {
         subscriptions: SubscriptionState,
         instruments_cache: Arc<AHashMap<Ustr, InstrumentAny>>,
         order_type_cache: Arc<DashMap<ClientOrderId, OrderType>>,
+        order_symbol_cache: Arc<DashMap<ClientOrderId, Ustr>>,
     ) -> Self {
         let handler = BitmexFeedHandler::new(receiver, signal);
         Self {
@@ -1332,6 +1347,7 @@ impl BitmexWsMessageHandler {
             subscriptions,
             instruments_cache,
             order_type_cache,
+            order_symbol_cache,
             quote_cache: QuoteCache::new(),
         }
     }
@@ -1418,8 +1434,8 @@ impl BitmexWsMessageHandler {
                             let msg = data.remove(0);
                             let Some(instrument) = self.get_instrument(&msg.symbol) else {
                                 tracing::error!(
-                                    symbol = %msg.symbol,
-                                    "Instrument not found for quote message"
+                                    "Instrument cache miss: quote message dropped for symbol={}",
+                                    msg.symbol
                                 );
                                 continue;
                             };
@@ -1507,22 +1523,12 @@ impl BitmexWsMessageHandler {
                                             self.get_instrument(&order_msg.symbol)
                                         else {
                                             tracing::error!(
-                                                symbol = %order_msg.symbol,
-                                                "Instrument not found for order message"
+                                                "Instrument cache miss: order message dropped for symbol={}, order_id={}",
+                                                order_msg.symbol,
+                                                order_msg.order_id
                                             );
                                             continue;
                                         };
-
-                                        // Cache the order type if we have both client order ID and order type
-                                        if let (Some(client_order_id), Some(ord_type)) =
-                                            (&order_msg.cl_ord_id, &order_msg.ord_type)
-                                        {
-                                            let client_order_id =
-                                                ClientOrderId::new(client_order_id);
-                                            let order_type: OrderType = (*ord_type).into();
-                                            self.order_type_cache
-                                                .insert(client_order_id, order_type);
-                                        }
 
                                         match parse_order_msg(
                                             &order_msg,
@@ -1530,10 +1536,29 @@ impl BitmexWsMessageHandler {
                                             &self.order_type_cache,
                                         ) {
                                             Ok(report) => {
+                                                // Cache the order type and symbol AFTER successful parse
+                                                if let Some(client_order_id) = &order_msg.cl_ord_id
+                                                {
+                                                    let client_order_id =
+                                                        ClientOrderId::new(client_order_id);
+
+                                                    if let Some(ord_type) = &order_msg.ord_type {
+                                                        let order_type: OrderType =
+                                                            (*ord_type).into();
+                                                        self.order_type_cache
+                                                            .insert(client_order_id, order_type);
+                                                    }
+
+                                                    // Cache symbol for execution message routing
+                                                    self.order_symbol_cache
+                                                        .insert(client_order_id, order_msg.symbol);
+                                                }
+
                                                 if is_terminal_order_status(report.order_status)
                                                     && let Some(client_id) = report.client_order_id
                                                 {
                                                     self.order_type_cache.remove(&client_id);
+                                                    self.order_symbol_cache.remove(&client_id);
                                                 }
 
                                                 reports.push(report);
@@ -1555,11 +1580,19 @@ impl BitmexWsMessageHandler {
                                         let Some(instrument) = self.get_instrument(&msg.symbol)
                                         else {
                                             tracing::error!(
-                                                symbol = %msg.symbol,
-                                                "Instrument not found for order update"
+                                                "Instrument cache miss: order update dropped for symbol={}, order_id={}",
+                                                msg.symbol,
+                                                msg.order_id
                                             );
                                             continue;
                                         };
+
+                                        // Populate cache for execution message routing (handles edge case where update arrives before full snapshot)
+                                        if let Some(cl_ord_id) = &msg.cl_ord_id {
+                                            let client_order_id = ClientOrderId::new(cl_ord_id);
+                                            self.order_symbol_cache
+                                                .insert(client_order_id, msg.symbol);
+                                        }
 
                                         if let Some(event) = parse_order_update_msg(
                                             &msg,
@@ -1588,28 +1621,71 @@ impl BitmexWsMessageHandler {
                             let mut fills = Vec::with_capacity(data.len());
 
                             for exec_msg in data {
-                                // Skip if symbol is missing (shouldn't happen for valid trades)
-                                let Some(symbol) = &exec_msg.symbol else {
-                                    // Only log as warn for Trade executions, debug for others to reduce noise
-                                    if exec_msg.exec_type == Some(BitmexExecType::Trade) {
-                                        tracing::warn!(
-                                            "Execution message missing symbol: {:?}",
-                                            exec_msg.exec_id
-                                        );
+                                // Try to get symbol, fall back to cache lookup if missing
+                                let symbol_opt = if let Some(sym) = &exec_msg.symbol {
+                                    Some(*sym)
+                                } else if let Some(cl_ord_id) = &exec_msg.cl_ord_id {
+                                    // Try to look up symbol from order_symbol_cache
+                                    let client_order_id = ClientOrderId::new(cl_ord_id);
+                                    self.order_symbol_cache
+                                        .get(&client_order_id)
+                                        .map(|r| *r.value())
+                                } else {
+                                    None
+                                };
+
+                                let Some(symbol) = symbol_opt else {
+                                    // Symbol missing - log appropriately based on exec type and whether we had clOrdID
+                                    if let Some(cl_ord_id) = &exec_msg.cl_ord_id {
+                                        if exec_msg.exec_type == Some(BitmexExecType::Trade) {
+                                            tracing::warn!(
+                                                cl_ord_id = %cl_ord_id,
+                                                exec_id = ?exec_msg.exec_id,
+                                                ord_rej_reason = ?exec_msg.ord_rej_reason,
+                                                text = ?exec_msg.text,
+                                                "Execution message missing symbol and not found in cache"
+                                            );
+                                        } else {
+                                            tracing::debug!(
+                                                cl_ord_id = %cl_ord_id,
+                                                exec_id = ?exec_msg.exec_id,
+                                                exec_type = ?exec_msg.exec_type,
+                                                ord_rej_reason = ?exec_msg.ord_rej_reason,
+                                                text = ?exec_msg.text,
+                                                "Execution message missing symbol and not found in cache"
+                                            );
+                                        }
                                     } else {
-                                        tracing::debug!(
-                                            "Execution message missing symbol: {:?} (exec_type: {:?})",
-                                            exec_msg.exec_id,
-                                            exec_msg.exec_type
-                                        );
+                                        // CancelReject messages without symbol/clOrdID are expected when using
+                                        // redundant cancel broadcasting - one cancel succeeds, others arrive late
+                                        // and BitMEX responds with CancelReject but doesn't populate the fields
+                                        if exec_msg.exec_type == Some(BitmexExecType::CancelReject)
+                                        {
+                                            tracing::debug!(
+                                                exec_id = ?exec_msg.exec_id,
+                                                order_id = ?exec_msg.order_id,
+                                                "CancelReject message missing symbol/clOrdID (expected with redundant cancels)"
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                exec_id = ?exec_msg.exec_id,
+                                                order_id = ?exec_msg.order_id,
+                                                exec_type = ?exec_msg.exec_type,
+                                                ord_rej_reason = ?exec_msg.ord_rej_reason,
+                                                text = ?exec_msg.text,
+                                                "Execution message missing both symbol and clOrdID, cannot process"
+                                            );
+                                        }
                                     }
                                     continue;
                                 };
-                                let Some(instrument) = self.get_instrument(symbol) else {
+
+                                let Some(instrument) = self.get_instrument(&symbol) else {
                                     tracing::error!(
-                                        symbol = %symbol,
-                                        exec_id = ?exec_msg.exec_id,
-                                        "Instrument not found for execution message"
+                                        "Instrument cache miss: execution message dropped for symbol={}, exec_id={:?}, exec_type={:?}. CRITICAL: Liquidation/ADL fills may be lost",
+                                        symbol,
+                                        exec_msg.exec_id,
+                                        exec_msg.exec_type
                                     );
                                     continue;
                                 };
@@ -1628,8 +1704,9 @@ impl BitmexWsMessageHandler {
                             if let Some(pos_msg) = data.into_iter().next() {
                                 let Some(instrument) = self.get_instrument(&pos_msg.symbol) else {
                                     tracing::error!(
-                                        symbol = %pos_msg.symbol,
-                                        "Instrument not found for position message"
+                                        "Instrument cache miss: position message dropped for symbol={}, account={}",
+                                        pos_msg.symbol,
+                                        pos_msg.account
                                     );
                                     continue;
                                 };

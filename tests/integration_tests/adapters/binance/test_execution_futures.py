@@ -23,6 +23,8 @@ from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.config import BinanceExecClientConfig
 from nautilus_trader.adapters.binance.futures.execution import BinanceFuturesExecutionClient
 from nautilus_trader.adapters.binance.futures.providers import BinanceFuturesInstrumentProvider
+from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesAccountInfo
+from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesSymbolConfig
 from nautilus_trader.adapters.binance.http.client import BinanceHttpClient
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
@@ -1173,12 +1175,12 @@ class TestBinanceFuturesExecutionClient:
         assert "INVALID_TRIGGER_PRICE" in reason
 
     @pytest.mark.asyncio()
-    async def test_submit_trailing_stop_without_activation_price_denied(self, mocker):
+    async def test_submit_trailing_stop_without_activation_price_omits_param(self, mocker):
         # Arrange
         mock_send_request = mocker.patch(
             target="nautilus_trader.adapters.binance.http.client.BinanceHttpClient.send_request",
         )
-        mock_generate_denied = mocker.patch.object(self.exec_client, "generate_order_denied")
+        mocker.patch.object(self.exec_client, "_is_dual_side_position", False)
 
         order = self.strategy.order_factory.trailing_stop_market(
             instrument_id=ETHUSDT_PERP_BINANCE.id,
@@ -1200,13 +1202,21 @@ class TestBinanceFuturesExecutionClient:
 
         # Act
         self.exec_client.submit_order(submit_order)
-        await eventually(lambda: mock_generate_denied.called)
+        await eventually(lambda: mock_send_request.call_args)
 
-        # Assert
-        mock_send_request.assert_not_called()
-        mock_generate_denied.assert_called_once()
-        reason = mock_generate_denied.call_args.kwargs["reason"]
-        assert "MISSING_ACTIVATION_PRICE" in reason
+        # Assert: Order submitted successfully with activationPrice omitted
+        request = mock_send_request.call_args
+        assert request[0][0] == HttpMethod.POST
+        assert request[0][1] == "/fapi/v1/order"
+        payload = request[1]["payload"]
+        assert payload["symbol"] == "ETHUSDT"
+        assert payload["type"] == "TRAILING_STOP_MARKET"
+        assert payload["side"] == "SELL"
+        assert payload["quantity"] == "10"
+        assert payload["callbackRate"] == "1.0"
+        # Critical: activationPrice should NOT be in the payload when None
+        # This allows Binance to use server-side current market price
+        assert "activationPrice" not in payload
 
     @pytest.mark.asyncio()
     async def test_submit_oco_order_list_denied(self, mocker):
@@ -1325,3 +1335,83 @@ class TestBinanceFuturesExecutionClient:
         reason = mock_generate_denied.call_args.kwargs["reason"]
         assert "UNSUPPORTED_TIME_IN_FORCE" in reason
         assert "DAY" in reason
+
+    @pytest.mark.asyncio()
+    async def test_leverage_initialization_from_symbol_config(self, mocker):
+        """
+        Test that leverage is initialized from symbolConfig endpoint.
+
+        This ensures leverage is set for all symbols, including those without active
+        positions, fixing the issue where fresh accounts would have default 1x leverage.
+
+        """
+        # Arrange
+        # Mock account info query
+        account_info = BinanceFuturesAccountInfo(
+            feeTier=0,
+            canTrade=True,
+            canDeposit=True,
+            canWithdraw=True,
+            updateTime=1234567890000,
+            assets=[],
+        )
+        mocker.patch.object(
+            self.exec_client._futures_http_account,
+            "query_futures_account_info",
+            return_value=account_info,
+        )
+
+        # Mock generate_account_state
+        mocker.patch.object(self.exec_client, "generate_account_state")
+
+        # Mock account retrieval
+        mock_account = mocker.Mock()
+        mock_account.set_leverage = mocker.Mock()
+        mocker.patch.object(self.exec_client, "get_account", return_value=mock_account)
+
+        # Create multiple symbol configs (including symbols without positions)
+        symbol_configs = [
+            BinanceFuturesSymbolConfig(
+                symbol="ETHUSDT",
+                marginType="CROSSED",
+                isAutoAddMargin=False,
+                leverage=20,
+                maxNotionalValue="1000000",
+            ),
+            BinanceFuturesSymbolConfig(
+                symbol="BTCUSDT",
+                marginType="CROSSED",
+                isAutoAddMargin=False,
+                leverage=25,
+                maxNotionalValue="2000000",
+            ),
+        ]
+        mock_query_symbol_config = mocker.patch.object(
+            self.exec_client._futures_http_account,
+            "query_futures_symbol_config",
+            return_value=symbol_configs,
+        )
+
+        # Mock instrument cache to return instrument IDs
+        def get_instrument_id(symbol):
+            if symbol == "ETHUSDT":
+                return ETHUSDT_PERP_BINANCE.id
+            raise KeyError(f"Symbol {symbol} not loaded")
+
+        mocker.patch.object(
+            self.exec_client,
+            "_get_cached_instrument_id",
+            side_effect=get_instrument_id,
+        )
+
+        # Act
+        await self.exec_client._update_account_state()
+
+        # Assert
+        mock_query_symbol_config.assert_called_once()
+
+        # Verify leverage was set for ETHUSDT (loaded instrument)
+        assert mock_account.set_leverage.call_count == 1
+        call_args = mock_account.set_leverage.call_args
+        assert call_args[0][0] == ETHUSDT_PERP_BINANCE.id
+        assert call_args[0][1] == Decimal("20")

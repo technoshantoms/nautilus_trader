@@ -1718,10 +1718,27 @@ mod tests {
     ) {
         let mut actor = create_registered_actor(clock, cache, trader_id);
 
-        let _ = actor.py_subscribe_data(data_type.clone(), Some(client_id), None);
-        let _ = actor.py_subscribe_quotes(audusd_sim.id, Some(client_id), None);
-        let _ = actor.py_unsubscribe_data(data_type, Some(client_id), None);
-        let _ = actor.py_unsubscribe_quotes(audusd_sim.id, Some(client_id), None);
+        // Verify subscription methods execute without error
+        assert!(
+            actor
+                .py_subscribe_data(data_type.clone(), Some(client_id), None)
+                .is_ok()
+        );
+        assert!(
+            actor
+                .py_subscribe_quotes(audusd_sim.id, Some(client_id), None)
+                .is_ok()
+        );
+        assert!(
+            actor
+                .py_unsubscribe_data(data_type, Some(client_id), None)
+                .is_ok()
+        );
+        assert!(
+            actor
+                .py_unsubscribe_quotes(audusd_sim.id, Some(client_id), None)
+                .is_ok()
+        );
     }
 
     #[ignore = "TODO: Under development"]
@@ -1951,9 +1968,7 @@ mod tests {
         pyo3::Python::initialize();
         let mut test_actor = TestDataActor::new();
         test_actor.reset_tracker();
-        test_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        test_actor.register(trader_id, clock, cache).unwrap();
 
         let signal = Signal::new(
             Ustr::from("test_signal"),
@@ -1975,9 +1990,7 @@ mod tests {
         pyo3::Python::initialize();
         let mut test_actor = TestDataActor::new();
         test_actor.reset_tracker();
-        test_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        test_actor.register(trader_id, clock, cache).unwrap();
 
         assert!(test_actor.on_data(&()).is_ok());
         assert_eq!(test_actor.get_call_count("on_data"), 1);
@@ -1992,9 +2005,7 @@ mod tests {
         pyo3::Python::initialize();
         let mut test_actor = TestDataActor::new();
         test_actor.reset_tracker();
-        test_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        test_actor.register(trader_id, clock, cache).unwrap();
 
         let time_event = TimeEvent::new(
             Ustr::from("test_timer"),
@@ -2016,9 +2027,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let instrument = InstrumentAny::CurrencyPair(audusd_sim);
 
@@ -2034,9 +2043,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let quote = QuoteTick::new(
             audusd_sim.id,
@@ -2060,9 +2067,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let trade = TradeTick::new(
             audusd_sim.id,
@@ -2086,9 +2091,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let bar_type =
             BarType::from_str(&format!("{}-1-MINUTE-LAST-INTERNAL", audusd_sim.id)).unwrap();
@@ -2115,9 +2118,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let book = OrderBook::new(audusd_sim.id, BookType::L2_MBP);
         assert!(rust_actor.on_book(&book).is_ok());
@@ -2132,9 +2133,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let delta =
             OrderBookDelta::clear(audusd_sim.id, 0, UnixNanos::default(), UnixNanos::default());
@@ -2152,9 +2151,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let mark_price = MarkPriceUpdate::new(
             audusd_sim.id,
@@ -2175,9 +2172,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let index_price = IndexPriceUpdate::new(
             audusd_sim.id,
@@ -2198,9 +2193,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let status = InstrumentStatus::new(
             audusd_sim.id,
@@ -2226,9 +2219,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let close = InstrumentClose::new(
             audusd_sim.id,
@@ -2251,9 +2242,7 @@ mod tests {
         pyo3::Python::initialize();
         let mut test_actor = TestDataActor::new();
         test_actor.reset_tracker();
-        test_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        test_actor.register(trader_id, clock, cache).unwrap();
 
         let block = Block::new(
             "0x1234567890abcdef".to_string(),
@@ -2279,9 +2268,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let chain = Arc::new(Chain::new(Blockchain::Ethereum, 1));
         let dex = Arc::new(Dex::new(
@@ -2329,8 +2316,9 @@ mod tests {
         ));
 
         let swap = PoolSwap::new(
-            chain.clone(),
-            dex.clone(),
+            chain,
+            dex,
+            pool.instrument_id,
             pool.address,
             12345,
             "0xabc123".to_string(),
@@ -2365,9 +2353,7 @@ mod tests {
     ) {
         pyo3::Python::initialize();
         let mut rust_actor = PyDataActor::new(None);
-        rust_actor
-            .register(trader_id, clock.clone(), cache.clone())
-            .unwrap();
+        rust_actor.register(trader_id, clock, cache).unwrap();
 
         let block = Block::new(
             "0x1234567890abcdef".to_string(),

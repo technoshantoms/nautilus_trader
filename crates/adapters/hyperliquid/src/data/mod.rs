@@ -54,7 +54,7 @@ use crate::{
     common::consts::{HYPERLIQUID_TESTNET_WS_URL, HYPERLIQUID_VENUE, HYPERLIQUID_WS_URL},
     config::HyperliquidDataClientConfig,
     http::{client::HyperliquidHttpClient, models::HyperliquidCandle},
-    websocket::client::HyperliquidWebSocketClient,
+    websocket::{client::HyperliquidWebSocketClient, messages::HyperliquidWsMessage},
 };
 
 #[derive(Debug)]
@@ -63,7 +63,7 @@ pub struct HyperliquidDataClient {
     #[allow(dead_code)]
     config: HyperliquidDataClientConfig,
     http_client: HyperliquidHttpClient,
-    ws_client: Arc<tokio::sync::RwLock<HyperliquidWebSocketClient>>,
+    ws_client: HyperliquidWebSocketClient,
     is_connected: AtomicBool,
     cancellation_token: CancellationToken,
     tasks: Vec<JoinHandle<()>>,
@@ -108,7 +108,7 @@ impl HyperliquidDataClient {
             client_id,
             config,
             http_client,
-            ws_client: Arc::new(tokio::sync::RwLock::new(ws_client)),
+            ws_client,
             is_connected: AtomicBool::new(false),
             cancellation_token: CancellationToken::new(),
             tasks: Vec::new(),
@@ -140,18 +140,70 @@ impl HyperliquidDataClient {
     }
 
     async fn spawn_ws(&mut self) -> anyhow::Result<()> {
-        tracing::info!("Connecting to Hyperliquid WebSocket");
-
         self.ws_client
-            .write()
-            .await
             .ensure_connected()
             .await
             .context("Failed to connect to Hyperliquid WebSocket")?;
 
-        tracing::info!("Hyperliquid WebSocket client connected successfully");
-
+        // No message processing loop needed - the WebSocket client handles it internally
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn handle_ws_message(
+        msg: HyperliquidWsMessage,
+        data_sender: &tokio::sync::mpsc::UnboundedSender<DataEvent>,
+        instruments: &Arc<RwLock<AHashMap<InstrumentId, InstrumentAny>>>,
+        _venue: Venue,
+        clock: &'static AtomicTime,
+    ) {
+        use crate::websocket::parse::parse_ws_quote_tick;
+
+        match msg {
+            HyperliquidWsMessage::Bbo { data } => {
+                tracing::debug!("Received BBO message for coin: {}", data.coin);
+
+                // Find instrument by matching the coin prefix
+                // Hyperliquid WebSocket sends coin="BTC", but we have instrument "BTC-PERP"
+                let instruments_map = instruments.read().unwrap();
+                let matching_instrument = instruments_map.iter().find(|(id, _)| {
+                    id.symbol.as_str().starts_with(data.coin.as_str())
+                        && id.symbol.as_str().split('-').next() == Some(data.coin.as_str())
+                });
+
+                if let Some((_, instrument)) = matching_instrument {
+                    let ts_init = clock.get_time_ns();
+
+                    match parse_ws_quote_tick(&data, instrument, ts_init) {
+                        Ok(quote_tick) => {
+                            tracing::debug!(
+                                "Parsed quote tick for {}: bid={}, ask={}",
+                                data.coin,
+                                quote_tick.bid_price,
+                                quote_tick.ask_price
+                            );
+                            if let Err(e) =
+                                data_sender.send(DataEvent::Data(Data::Quote(quote_tick)))
+                            {
+                                tracing::error!("Failed to send quote tick: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to parse quote tick for {}: {e}", data.coin);
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "Received BBO for unknown coin: {} (no matching instrument found)",
+                        data.coin
+                    );
+                }
+            }
+            _ => {
+                // Log other message types for debugging
+                tracing::trace!("Received WebSocket message: {:?}", msg);
+            }
+        }
     }
 
     fn get_instrument(&self, instrument_id: &InstrumentId) -> anyhow::Result<InstrumentAny> {
@@ -227,8 +279,6 @@ impl DataClient for HyperliquidDataClient {
             return Ok(());
         }
 
-        tracing::info!("Connecting HyperliquidDataClient...");
-
         // Bootstrap instruments from HTTP API
         let _instruments = self
             .bootstrap_instruments()
@@ -241,7 +291,7 @@ impl DataClient for HyperliquidDataClient {
             .context("Failed to spawn WebSocket client")?;
 
         self.is_connected.store(true, Ordering::Relaxed);
-        tracing::info!("HyperliquidDataClient connected");
+        tracing::info!("Hyperliquid data client connected");
 
         Ok(())
     }
@@ -250,8 +300,6 @@ impl DataClient for HyperliquidDataClient {
         if !self.is_connected() {
             return Ok(());
         }
-
-        tracing::info!("Disconnecting HyperliquidDataClient...");
 
         // Cancel all tasks
         self.cancellation_token.cancel();
@@ -264,7 +312,7 @@ impl DataClient for HyperliquidDataClient {
         }
 
         // Disconnect WebSocket client
-        if let Err(e) = self.ws_client.write().await.disconnect().await {
+        if let Err(e) = self.ws_client.disconnect().await {
             tracing::error!("Error disconnecting WebSocket client: {e}");
         }
 
@@ -275,7 +323,7 @@ impl DataClient for HyperliquidDataClient {
         }
 
         self.is_connected.store(false, Ordering::Relaxed);
-        tracing::info!("HyperliquidDataClient disconnected");
+        tracing::info!("Hyperliquid data client disconnected");
 
         Ok(())
     }
@@ -412,13 +460,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to subscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.subscribe_trades(coin).await {
+            if let Err(err) = ws.subscribe_trades(coin).await {
                 tracing::error!("Failed to subscribe to trades: {err:?}");
             }
         });
@@ -444,13 +491,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to unsubscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.unsubscribe_trades(coin).await {
+            if let Err(err) = ws.unsubscribe_trades(coin).await {
                 tracing::error!("Failed to unsubscribe from trades: {err:?}");
             }
         });
@@ -488,13 +534,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to subscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.subscribe_book(coin).await {
+            if let Err(err) = ws.subscribe_book(coin).await {
                 tracing::error!("Failed to subscribe to book deltas: {err:?}");
             }
         });
@@ -526,13 +571,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to unsubscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.unsubscribe_book(coin).await {
+            if let Err(err) = ws.unsubscribe_book(coin).await {
                 tracing::error!("Failed to unsubscribe from book deltas: {err:?}");
             }
         });
@@ -576,13 +620,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to subscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.subscribe_bbo(coin).await {
+            if let Err(err) = ws.subscribe_bbo(coin).await {
                 tracing::error!("Failed to subscribe to book snapshots: {err:?}");
             }
         });
@@ -614,13 +657,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to unsubscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.unsubscribe_bbo(coin).await {
+            if let Err(err) = ws.unsubscribe_bbo(coin).await {
                 tracing::error!("Failed to unsubscribe from book snapshots: {err:?}");
             }
         });
@@ -653,13 +695,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to subscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.subscribe_bbo(coin).await {
+            if let Err(err) = ws.subscribe_bbo(coin).await {
                 tracing::error!("Failed to subscribe to quotes: {err:?}");
             }
         });
@@ -685,13 +726,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to unsubscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.unsubscribe_bbo(coin).await {
+            if let Err(err) = ws.unsubscribe_bbo(coin).await {
                 tracing::error!("Failed to unsubscribe from quotes: {err:?}");
             }
         });
@@ -728,13 +768,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to subscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.subscribe_candle(coin, interval).await {
+            if let Err(err) = ws.subscribe_candle(coin, interval).await {
                 tracing::error!("Failed to subscribe to bars: {err:?}");
             }
         });
@@ -760,13 +799,12 @@ impl DataClient for HyperliquidDataClient {
             .context("Invalid instrument symbol")?;
         let coin = Ustr::from(coin);
 
-        // Clone WebSocket client Arc for async task
-        let ws = Arc::clone(&self.ws_client);
+        // Clone WebSocket client for async task
+        let ws = self.ws_client.clone();
 
         // Spawn async task to unsubscribe
         tokio::spawn(async move {
-            let mut ws_guard = ws.write().await;
-            if let Err(err) = ws_guard.unsubscribe_candle(coin, interval).await {
+            if let Err(err) = ws.unsubscribe_candle(coin, interval).await {
                 tracing::error!("Failed to unsubscribe from bars: {err:?}");
             }
         });
