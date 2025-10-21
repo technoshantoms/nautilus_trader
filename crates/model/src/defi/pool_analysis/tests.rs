@@ -16,7 +16,10 @@
 use std::{
     ops::{Div, Mul},
     str::FromStr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use alloy_primitives::{Address, I256, U160, U256, address};
@@ -38,6 +41,14 @@ use crate::defi::{
         tick_math::get_tick_at_sqrt_ratio,
     },
 };
+
+// Global counter for log indices to ensure each test event has a unique position
+static LOG_INDEX_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Gets the next log index for test events
+fn next_log_index() -> u32 {
+    LOG_INDEX_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
 
 fn arbitrum() -> SharedChain {
     Arc::new(Chain::from_chain_id(42161).unwrap().clone())
@@ -129,7 +140,7 @@ fn create_mint_event(
         100000,
         "0x1aa3506e78dd6e7e53986fa310c7ef1b7825042e19693c04eb56b2404067407b".to_string(),
         0,
-        1,
+        next_log_index(),
         None,
         owner,
         liquidity,
@@ -164,7 +175,7 @@ fn create_burn_event(
         100000,
         "0x1aa3506e78dd6e7e53986fa310c7ef1b7825042e19693c04eb56b2404067407b".to_string(),
         0,
-        1,
+        next_log_index(),
         None,
         owner,
         liquidity,
@@ -188,10 +199,10 @@ fn create_collect_event(
         uniswap_v3(arbitrum()),
         pool_definition.instrument_id,
         pool_definition.address,
-        10000,
+        100000,
         "0x1aa3506e78dd6e7e53986fa310c7ef1b7825042e19693c04eb56b2404067407b".to_string(),
         0,
-        1,
+        next_log_index(),
         lp_address(),
         amount0,
         amount1,
@@ -206,7 +217,7 @@ fn create_block_position() -> BlockPosition {
         100000,
         "0x1aa3506e78dd6e7e53986fa310c7ef1b7825042e19693c04eb56b2404067407b".to_string(),
         0,
-        1,
+        next_log_index(),
     )
 }
 
@@ -632,7 +643,7 @@ fn test_execute_swap_equivalence() {
     // but the core state (tick, price, liquidity) should be identical
 }
 
-// Follow Uniswapv3 offical tests
+// Follow Uniswapv3 official tests
 // Initialize pool profiler here https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L194
 #[fixture]
 fn uni_pool_profiler() -> PoolProfiler {
@@ -881,7 +892,7 @@ fn test_if_removing_of_liquidity_works_after_mint(mut uni_pool_profiler: PoolPro
         assert_eq!(position.liquidity, 0);
         assert_eq!(position.total_amount0_deposited, amount0);
         assert_eq!(position.total_amount1_deposited, amount1);
-        // With burn we didnt collect anything so and tokens stays in tokens_owned_* variables
+        // With burn we didn't collect anything so and tokens stays in tokens_owned_* variables
         assert_eq!(position.total_amount0_collected, 0);
         assert_eq!(position.total_amount1_collected, 0);
         assert_eq!(position.tokens_owed_0, 120);
@@ -1380,7 +1391,7 @@ fn test_mint_below_current_price_when_token1_only_changed(mut uni_pool_profiler:
 }
 
 #[rstest]
-fn test_mint_bellow_current_price_when_really_high_leverage(mut uni_pool_profiler: PoolProfiler) {
+fn test_mint_below_current_price_when_really_high_leverage(mut uni_pool_profiler: PoolProfiler) {
     // https://github.com/Uniswap/v3-core/blob/main/test/UniswapV3Pool.spec.ts#L435
     let lower_tick = PoolTick::get_min_tick(TICK_SPACING);
     let upper_tick = lower_tick + TICK_SPACING;
@@ -1823,7 +1834,7 @@ fn test_flash_increases_fee_growth_by_expected_amount(mut medium_fee_pool_profil
     assert_eq!(medium_fee_pool_profiler.analytics.total_flashes, 1);
 }
 
-// ---------- ACTIVE LIQUIDITY AND TICK CROSSING TESTS WHEN SWAPING ----------
+// ---------- ACTIVE LIQUIDITY AND TICK CROSSING TESTS WHEN SWAPPING ----------
 
 #[rstest]
 fn test_swap_crossing_tick_down_activates_position(mut uni_pool_profiler: PoolProfiler) {

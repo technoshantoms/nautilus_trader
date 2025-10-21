@@ -17,6 +17,8 @@ This will be the final release with support for Python 3.11.
 - Added contingent order fields `parent_order_id` and `linked_order_ids` for `OrderStatusReport` and reconciliation
 - Added `fs_rust_storage_options` to Python catalog (#3008), thanks @faysou and @Johnkhk
 - Added matching engine fallback to default order book for custom fill models (#3039), thanks @Hamish-Leahy
+- Added filesystem parameter to parquet in the consolidate functions (#3097), thanks @huracosunah
+- Added azure support for az protocol (#3102), thanks @huracosunah
 - Added Binance BBO `price_match` parameter support for order submission
 - Added BitMEX conditional orders support
 - Added BitMEX batch cancel support
@@ -34,12 +36,12 @@ This will be the final release with support for Python 3.11.
 - Added OKX trade mode per order via `params` using `td_mode` key
 - Added OKX margin configuration and spot margin support
 - Added OKX demo account support
+- Added OKX batch cancel support
 - Added Polymarket native market orders support
 
 ### Breaking Changes
 - Removed `nautilus_trader.analysis.statistics` subpackage - all statistics are now implemented in Rust and must be imported from `nautilus_trader.analysis` (e.g., `from nautilus_trader.analysis import WinRate`)
 - Removed partial bar functionality from bar aggregators and subscription APIs (#3020), thanks @faysou
-- Removed OKX `vip_level` config option as now redundant with detection through account query
 - Renamed `nautilus-cli` crate feature flag from `hypersync` to `defi` (gates blockchain/DeFi commands)
 - Polymarket execution client no longer accepts market BUY orders unless `quote_quantity=True`
 
@@ -60,6 +62,7 @@ This will be the final release with support for Python 3.11.
 - Fixed `serialization` crate bugs and improve error handling
 - Fixed PyO3 interpreter lifecycle for async shutdown preventing edge case `"interpreter not initialized"` panics during shutdown
 - Fixed `RiskEngine` reduce-only cash exits (#2986), thanks for reporting @dennisnissle
+- Fixed `RiskEngine` quote quantity validation
 - Fixed overflow in `NautilusKernel` build time calculation due to negative duration (#2998), thanks for reporting @HaakonFlaaronning
 - Fixed handling of asyncio.CancelledError in execution reconciliation (#3073), thanks @dinana
 - Fixed edge case where rejected orders can remain in own order book
@@ -69,16 +72,22 @@ This will be the final release with support for Python 3.11.
 - Fixed filesystem usage in catalog for `isfile` and `isdir` (#2954), thanks @limx0
 - Fixed `SandboxExecutionClient` instrument data handling
 - Fixed `AccountState` Arrow serialization (#3005), thanks for reporting @nikzasel
+- Fixed `CryptoOption` Arrow schema `option_kind` field to accept string values
+- Fixed `FuturesSpread` Arrow schema missing max/min quantity and price fields
+- Fixed `OptionSpread` Arrow schema missing max/min quantity and price fields
+- Fixed `Commodity` Arrow schema to match from_dict requirements
 - Fixed safe encoded symbols (#2964), thanks @ms32035
 - Fixed nautilus CLI macOS compatibility with regex unicode-perl feature (#2969), thanks @learnerLj
 - Fixed fuzzy candlesticks indicator bugs (#3021), thanks @benhaben
 - Fixed return type annotation for `ArrowSerializer.deserialize` (#3076), thanks @MK27MK
+- Fixed initializing of sqrt price setting flow when `Pool` profiling (#3100), thanks @filipmacek
 - Fixed Binance duplicate `OrderSubmitted` event generation for order lists (#2994), thanks @sunlei
 - Fixed Binance websocket fill message parsing for Binance US with extra fields (#3006), thanks for reporting @bmlquant
 - Fixed Binance order status parsing for external orders (#3006), thanks for reporting @bmlquant
 - Fixed Binance execution handling for self-trade prevention and liquidations (#3006), thanks for reporting @bmlquant
 - Fixed Binance trailing stop to use server-side activation price (#3056), thanks for reporting @hope2see
 - Fixed Binance Futures reconciliation duplicated position bug (#3067), thanks @lisiyuan656
+- Fixed Binance `price_match` order price synchronization (#3074)
 - Fixed Binance Futures position risk query to use v3 API returning only symbols with positions or open orders (#3062), thanks for reporting @woung717
 - Fixed Binance Futures liquidation and ADL fill handling
 - Fixed BitMEX testnet support
@@ -89,6 +98,7 @@ This will be the final release with support for Python 3.11.
 - Fixed Bybit handling of `OrderModifyRejected` events from pending updates
 - Fixed Bybit account endpoint pagination handling
 - Fixed Coinbase Intx API credentials handling to allow passing explicitly
+- Fixed Databento MBO `Clear` actions and improve docs
 - Fixed Hyperliquid L1 signing with direct MessagePack serialization (#3087), thanks @nicolad
 - Fixed Interactive Brokers tick level historical data downloading (#2956), thanks @DracheShiki
 - Fixed Interactive Brokers instrument provider `TypeError` when load_ids/contracts are `None`, thanks for reporting @FGU1
@@ -101,6 +111,7 @@ This will be the final release with support for Python 3.11.
 - Fixed OKX API credentials handling to allow passing explicitly
 - Fixed OKX fee calculations to account for negative fees
 - Fixed OKX parsing for `tick_sz` across instrument types
+- Fixed OKX parsing for instruments `multiplier` field
 - Fixed Polymarket handling of one-sided quotes (#2950), thanks for reporting @thefabus
 - Fixed Polymarket websocket message handling (#2963, #2968), thanks @thefabus
 - Fixed Polymarket tick size change handling for quotes (#2980), thanks for reporting @santivazq
@@ -121,6 +132,7 @@ This will be the final release with support for Python 3.11.
 - Introduced snapshot, analytics, and PSQL schema for PoolProfiler (#3048), thanks @filipmacek
 - Implemented consistency checking for AMM pool profiler with RPC state (#3030), thanks @filipmacek
 - Implemented `PoolFlash` event in blockchain adapter (#3055, #3058), thanks @filipmacek
+- Implemented Blockchain adapter pool profiler snapshot integration (#3090), thanks @filipmacek
 - Implemented BitMEX robust ping/pong handling
 - Implemented Hyperliquid adapter HTTP client (#2939), thanks @nicolad
 - Implemented Hyperliquid adapter scaffolding and examples (#2957), thanks @nicolad
@@ -139,17 +151,21 @@ This will be the final release with support for Python 3.11.
 - Implemented Hyperliquid execution reconciliation (#3041), thanks @nicolad
 - Implemented Hyperliquid execution client order submission (#3050), thanks @nicolad
 - Implemented Hyperliquid LiveExecutionClientExt trait (#3075), thanks @nicolad
+- Implemented Hyperliquid typed enums and optimize WebSocket lookups (#3089), thanks @nicolad
 - Refactored Hyperliquid adapter to push complexity to Rust layer (#3063), thanks @nicolad
 - Refactored streaming writer to support per-bar-type persistence (#3078), thanks @faysou
 - Relaxed `Symbol`, `Currency`, and `InstrumentId` string validation from ASCII to UTF-8 which fixes Binance compatibility with Chinese symbols
 - Improved clock and timer thread safety and validations
 - Improved live timer lifecycle management by canceling existing timers with the same name
+- Improved `ActorExecutor` lifecycle and concurrency handling
 - Improved order books error handling, state integrity, and pprint/display
 - Improved websocket reconnection sequence protections in stream mode
 - Improved socket reconnect sequence and tighten client setup and testing
 - Improved socket client URL parsing
 - Improved compatibility of Makefile for Windows git-bash (#3066), thanks @faysou
 - Improved Blockchain adapter shutdown with cancellation token
+- Improved Blockchain adapter `node_test` script (#3092), thanks @filipmacek
+- Improved and optimize AMM pool profiling (#3098), thanks @filipmacek
 - Improved Hyperliquid adapter patterns (#2972), thanks @nicolad
 - Improved BitMEX spot instruments quantity handling by scaling to correct fractional units
 - Improved BitMEX REST rate limits configuration
@@ -157,6 +173,9 @@ This will be the final release with support for Python 3.11.
 - Improved Binance, Bybit, OKX, BitMEX, and Coinbase International HTTP rate limiting to enforce documented per-endpoint quotas
 - Improved Binance fill handling when instrument not cached with clearer error log
 - Improved OKX trade mode detection and fee currency parsing
+- Improved OKX client connection reliability
+- Improved OKX liquidation and ADL fill handling and logging
+- Improved Tardis instrument requests to filter options by default
 - Standardized Binance order validations with proper order denied events to avoid "hanging" orders
 - Refined Renko bar aggregator and add tests (#2961), thanks @faysou
 - Refined setting of flags in Makefile (#3060), thanks @faysou
@@ -174,6 +193,7 @@ This will be the final release with support for Python 3.11.
 - Upgraded `pyo3` and `pyo3-async-runtimes` crates to v0.26.0
 - Upgraded `redis` crate to v0.32.7
 - Upgraded `tokio` crate to v1.48.0
+- Upgraded `uvloop` to v0.22.1 (upgrades libuv to v1.49.0)
 
 ### Documentation Updates
 - Added quick-reference rate limit tables with links to official docs for Binance, Bybit, OKX, BitMEX, and Coinbase International
@@ -1794,7 +1814,7 @@ Released on 9th August 2024 (UTC).
 None
 
 ### Fixes
-- Fixed creation of `instrumend_id` folder when writing PyO3 bars in catalog (#1832), thanks @faysou
+- Fixed creation of `instrument_id` folder when writing PyO3 bars in catalog (#1832), thanks @faysou
 - Fixed `StreamingFeatherWriter` handling of `include_types` option (#1833), thanks @faysou
 - Fixed `BybitExecutionClient` position reports error handling and logging
 - Fixed `BybitExecutionClient` order report handling to correctly process external orders
@@ -2404,7 +2424,7 @@ Released on 3rd November 2023 (UTC).
 - Fixed managed GTD orders cancel timer on order cancel (timers were not being canceled)
 - Fixed `BacktestEngine` logging error with immediate stop (caused by certain timestamps being `None`)
 - Fixed `BacktestNode` exceptions during backtest runs preventing next sequential run, thanks for reporting @cavan-black
-- Fixed `BinanceSpotPersmission` value error by relaxing typing for `BinanceSpotSymbolInfo.permissions`
+- Fixed `BinanceSpotPermission` value error by relaxing typing for `BinanceSpotSymbolInfo.permissions`
 - Interactive Brokers adapter various fixes, thanks @rsmb7z
 
 ---
@@ -2447,7 +2467,7 @@ This will be the final release with support for Python 3.9.
 - Renamed `Actor.on_venue_status_update(...)` to `Actor.on_venue_status(...)`
 - Renamed `Actor.on_instrument_status_update(...)` to `Actor.on_instrument_status(...)`
 - Changed `InstrumentStatus` fields/schema and constructor
-- Moved `manage_gtd_expiry` from `Strategy.submit_order(...)` and `Strategy.submit_order_list(...)` to `StrategyConfig` (simpler and allows re-activiting any GTD timers on start)
+- Moved `manage_gtd_expiry` from `Strategy.submit_order(...)` and `Strategy.submit_order_list(...)` to `StrategyConfig` (simpler and allows re-activating any GTD timers on start)
 
 ### Fixes
 - Fixed `LimitIfTouchedOrder.create` (`exec_algorithm_params` were not being passed in)
@@ -3400,7 +3420,7 @@ Released on 10th May 2022 (UTC).
 - Added `WEEK` and `MONTH` bar aggregation options
 - Added `Position.closing_order_id` property
 - Added `tags` parameter to `Strategy.submit_order`
-- Added optional `check_positon_exists` flag to `Strategy.submit_order`
+- Added optional `check_position_exists` flag to `Strategy.submit_order`
 - Eliminated all use of `unsafe` Rust and C null-terminated byte strings
 - The `bypass_logging` config option will also now bypass the `BacktestEngine` logger
 
